@@ -21,6 +21,7 @@ struct CostUsageClaudeResolverTests {
             "claude-sonnet-4-5-20250929", "claude-sonnet-4-5", "claude-sonnet-4-5@20250929",
             "anthropic.claude-sonnet-4-5-20250929-v1:0", "us.anthropic.claude-sonnet-4-5-v1:0",
             "claude-sonnet-4-5@default", "claude-sonnet-4-6", "claude-opus-4-6",
+            "claude-opus-5-5", "anthropic.claude-fable-5-1",
             "anthropic/claude-sonnet-4-6", "vertex/claude-sonnet-4-5", "anthropic.anthropic.example",
             "anthropic.example", "example", "collision", "openai/collision", "unrecognized/collision",
             "gpt-fixture", "gemini-fixture", "kimi-fixture", "minimax-fixture", "deepseek-fixture",
