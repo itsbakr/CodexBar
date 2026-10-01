@@ -13,6 +13,7 @@
 
 - Reduce CPU use when importing browser sessions for Devin, MiniMax, and Windsurf.
 - Docs: link the community codexbar-kde Plasma widget for Linux usage meters and agent-session views (#4117). Thanks @materemias!
+- Claude: retire the Daily Routines usage row, its quota warnings and quota-low hook events, and its saved hide choice; the Claude card's extra rows are now the model-scoped weekly limits (for example, Fable weekly) when Anthropic reports them.
 ### Added
 
 - Antigravity: fetch quotas for saved Google accounts through private, temporary `agy` sessions, verify each account's identity, and retain refreshed credentials without changing the ambient CLI login (#4103). Thanks @Sogl!

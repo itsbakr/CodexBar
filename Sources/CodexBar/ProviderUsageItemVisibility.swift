@@ -34,6 +34,10 @@ struct ProviderUsageItemDescriptor: Identifiable, Equatable, Sendable {
 }
 
 extension ProviderUsageItemID {
+    /// Metric IDs that providers no longer report. Rows with these IDs are dropped from older synced and
+    /// last-known snapshots in the menu card and compact account rows, and stored choices to hide them are ignored.
+    static let retiredMetricIDs: Set<String> = ["claude-routines"]
+
     /// Label used when the provider is not reporting the item right now, so the settings row still
     /// names something recognizable instead of falling back to a raw storage key.
     func unreportedTitle(for provider: UsageProvider) -> String {
@@ -45,10 +49,6 @@ extension ProviderUsageItemID {
                 return L(detailSectionTitle)
             }
             guard let metricID = self.metricID else { return self.rawValue }
-            if metricID == "claude-routines" {
-                return L("Daily Routines")
-            }
-
             let providerPrefix = "\(provider.rawValue)-"
             let displayID = metricID.hasPrefix(providerPrefix)
                 ? String(metricID.dropFirst(providerPrefix.count))
@@ -149,23 +149,29 @@ extension UsageMenuCardView.Model {
 extension SettingsStore {
     func hiddenUsageItemIDs(for provider: UsageProvider) -> Set<ProviderUsageItemID> {
         if let storedIDs = self.providerConfig(for: provider)?.hiddenUsageItemIDs {
-            return Set(storedIDs.map(ProviderUsageItemID.init(rawValue:)))
+            // Retired IDs are ignored here but stay stored, so synced Macs on older versions keep hiding them.
+            let retiredIDs = ProviderUsageItemID.retiredMetricIDs.map(ProviderUsageItemID.metric)
+            return Set(storedIDs.map(ProviderUsageItemID.init(rawValue:))).subtracting(retiredIDs)
         }
 
         var hiddenIDs = Set<ProviderUsageItemID>()
-        // Provider-specific by design: migrate the legacy Codex Spark and Claude Daily Routines visibility toggles.
+        // Provider-specific by design: migrate the legacy Codex Spark visibility toggle.
         if provider == .codex, !self.codexSparkUsageVisible {
             hiddenIDs.insert(.metric("codex-spark"))
             hiddenIDs.insert(.metric("codex-spark-weekly"))
-        }
-        if provider == .claude, !self.claudeDailyRoutinesUsageVisible {
-            hiddenIDs.insert(.metric("claude-routines"))
         }
         return hiddenIDs
     }
 
     func isUsageItemVisible(_ itemID: ProviderUsageItemID, for provider: UsageProvider) -> Bool {
         !self.hiddenUsageItemIDs(for: provider).contains(itemID)
+    }
+
+    /// Metric IDs left out of compact account rows: the hidden rows plus retired ones that
+    /// last-known snapshots captured before the retirement can still carry.
+    func compactAccountHiddenMetricIDs(for provider: UsageProvider) -> Set<String> {
+        Set(self.hiddenUsageItemIDs(for: provider).compactMap(\.metricID))
+            .union(ProviderUsageItemID.retiredMetricIDs)
     }
 
     func setUsageItemVisible(
@@ -181,7 +187,7 @@ extension SettingsStore {
         }
         guard changed else { return }
 
-        self.persistHiddenUsageItemIDs(hiddenIDs, for: provider)
+        self.persistHiddenUsageItemIDs(hiddenIDs.union(self.storedRetiredUsageItemIDs(for: provider)), for: provider)
         self.updateLegacyUsageVisibility(provider: provider, hiddenItemIDs: hiddenIDs)
     }
 
@@ -192,6 +198,12 @@ extension SettingsStore {
 
         self.persistHiddenUsageItemIDs([], for: provider)
         self.updateLegacyUsageVisibility(provider: provider, hiddenItemIDs: [])
+    }
+
+    private func storedRetiredUsageItemIDs(for provider: UsageProvider) -> Set<ProviderUsageItemID> {
+        Set((self.providerConfig(for: provider)?.hiddenUsageItemIDs ?? [])
+            .map(ProviderUsageItemID.init(rawValue:))
+            .filter { ProviderUsageItemID.retiredMetricIDs.contains($0.metricID ?? "") })
     }
 
     private func persistHiddenUsageItemIDs(
@@ -208,16 +220,13 @@ extension SettingsStore {
         provider: UsageProvider,
         hiddenItemIDs: Set<ProviderUsageItemID>)
     {
-        // Provider-specific by design: keep legacy toggles synchronized so downgrades preserve the closest behavior.
+        // Provider-specific by design: keep the legacy Codex Spark toggle synchronized so downgrades behave closely.
         if provider == .codex {
             let sparkIDs: Set<ProviderUsageItemID> = [
                 .metric("codex-spark"),
                 .metric("codex-spark-weekly"),
             ]
             self.codexSparkUsageVisible = !sparkIDs.isSubset(of: hiddenItemIDs)
-        }
-        if provider == .claude {
-            self.claudeDailyRoutinesUsageVisible = !hiddenItemIDs.contains(.metric("claude-routines"))
         }
     }
 }

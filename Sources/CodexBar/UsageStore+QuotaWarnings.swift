@@ -129,7 +129,7 @@ extension UsageStore {
 
     private static func isClaudeNotifiableExtraWindow(_ named: NamedRateWindow) -> Bool {
         guard named.usageKnown else { return false }
-        return named.id.hasPrefix("claude-weekly-scoped-") || named.id == "claude-routines"
+        return named.id.hasPrefix("claude-weekly-scoped-")
     }
 
     private func handleQuotaWarningTransition(

@@ -14,7 +14,7 @@ extension StatusItemController {
             accounts: accounts,
             expandedAccountIDs: self.compactAccountExpandedIDs,
             healthyTailExpanded: self.compactAccountExpandedHealthyTailProviders.contains(provider.instanceID),
-            hiddenMetricIDs: Set(self.settings.hiddenUsageItemIDs(for: provider).compactMap(\.metricID)))
+            hiddenMetricIDs: self.settings.compactAccountHiddenMetricIDs(for: provider))
     }
 
     struct CompactAccountMenuRendering {

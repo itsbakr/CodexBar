@@ -183,8 +183,8 @@ struct ProvidersPaneCoverageTests {
     }
 
     @Test
-    func `claude provider preview follows daily routines visibility`() {
-        let settings = Self.makeSettingsStore(suite: "ProvidersPaneCoverageTests-claude-routines-preview")
+    func `claude provider preview follows scoped weekly visibility`() {
+        let settings = Self.makeSettingsStore(suite: "ProvidersPaneCoverageTests-claude-scoped-weekly-preview")
         let store = Self.makeUsageStore(settings: settings)
         let now = Date()
         store._setSnapshotForTesting(
@@ -205,8 +205,8 @@ struct ProvidersPaneCoverageTests {
                             resetsAt: now.addingTimeInterval(3600),
                             resetDescription: nil)),
                     NamedRateWindow(
-                        id: "claude-routines",
-                        title: "Daily Routines",
+                        id: "claude-weekly-scoped-example-model",
+                        title: "Example Model only",
                         window: RateWindow(
                             usedPercent: 40,
                             windowMinutes: 10080,
@@ -217,12 +217,13 @@ struct ProvidersPaneCoverageTests {
             provider: .claude)
         let pane = ProvidersPane(settings: settings, store: store)
 
-        #expect(pane._test_menuCardModel(for: .claude).metrics.contains { $0.id == "claude-routines" })
+        #expect(pane._test_menuCardModel(for: .claude).metrics.contains { $0.id == "claude-weekly-scoped-fable" })
 
-        settings.setUsageItemVisible(false, itemID: .metric("claude-routines"), for: .claude)
+        settings.setUsageItemVisible(false, itemID: .metric("claude-weekly-scoped-fable"), for: .claude)
         let hiddenModel = pane._test_menuCardModel(for: .claude)
-        #expect(!hiddenModel.metrics.contains { $0.id == "claude-routines" })
-        #expect(hiddenModel.metrics.contains { $0.id == "claude-weekly-scoped-fable" })
+        #expect(!hiddenModel.metrics.contains { $0.id == "claude-weekly-scoped-fable" })
+        #expect(hiddenModel.metrics.contains { $0.id == "claude-weekly-scoped-example-model" })
+        #expect(hiddenModel.metrics.contains { $0.id == "primary" })
     }
 
     @Test

@@ -68,18 +68,18 @@ struct QuotaWarningNotificationLogicTests {
             threshold: 50,
             currentRemaining: 45,
             windowID: "claude-weekly-scoped-fable")
-        let routines = QuotaWarningEvent(
+        let sibling = QuotaWarningEvent(
             window: .weekly,
             threshold: 50,
             currentRemaining: 45,
-            windowID: "claude-routines")
+            windowID: "claude-weekly-scoped-example-model")
 
-        let ids = [fable, routines].map {
+        let ids = [fable, sibling].map {
             QuotaWarningNotificationLogic.notificationIDPrefix(provider: .claude, event: $0)
         }
         #expect(Set(ids).count == 2)
         #expect(ids[0].contains("claude-weekly-scoped-fable"))
-        #expect(ids[1].contains("claude-routines"))
+        #expect(ids[1].contains("claude-weekly-scoped-example-model"))
     }
 
     @Test

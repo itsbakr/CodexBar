@@ -266,9 +266,9 @@ struct ClaudeCLIScopedWeeklyUsageTests {
                 modelID: "test-only-fable-id",
                 modelName: "Fable"),
         ]).first)
-        let routines = NamedRateWindow(
-            id: "claude-routines",
-            title: "Daily Routines",
+        let webOnlySibling = NamedRateWindow(
+            id: "claude-weekly-scoped-example-model",
+            title: "Example Model only",
             window: RateWindow(
                 usedPercent: 11,
                 windowMinutes: 7 * 24 * 60,
@@ -277,12 +277,12 @@ struct ClaudeCLIScopedWeeklyUsageTests {
 
         let merged = ClaudeUsageFetcher._mergeExtraRateWindowsForTesting(
             primary: [fable],
-            web: [webFable, routines])
+            web: [webFable, webOnlySibling])
 
-        #expect(merged.map(\.id) == ["claude-weekly-scoped-fable", "claude-routines"])
+        #expect(merged.map(\.id) == ["claude-weekly-scoped-fable", "claude-weekly-scoped-example-model"])
         #expect(webFable.id == "claude-weekly-scoped-test-only-fable-id")
         #expect(merged.first?.window.usedPercent == 68)
-        #expect(merged.last?.title == "Daily Routines")
+        #expect(merged.last?.title == "Example Model only")
     }
 
     @Test

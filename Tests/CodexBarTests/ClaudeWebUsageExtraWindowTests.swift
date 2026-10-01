@@ -242,7 +242,7 @@ struct ClaudeWebUsageExtraWindowTests {
     }
 
     @Test
-    func `ignores merged claude web API omelette usage window`() throws {
+    func `ignores merged claude web API omelette and cowork usage windows`() throws {
         let json = """
         {
           "five_hour": { "utilization": 9, "resets_at": "2025-12-23T16:00:00.000Z" },
@@ -252,24 +252,27 @@ struct ClaudeWebUsageExtraWindowTests {
         """
         let data = Data(json.utf8)
         let parsed = try ClaudeWebAPIFetcher._parseUsageResponseForTesting(data)
-        #expect(parsed.extraRateWindows.count == 1)
-        #expect(parsed.extraRateWindows.contains { $0.id == "claude-design" } == false)
-        #expect(parsed.extraRateWindows.first(where: { $0.id == "claude-routines" })?.window.usedPercent == 11)
+        #expect(parsed.extraRateWindows.isEmpty)
     }
 
     @Test
-    func `omits routines window when claude web API cowork is null`() throws {
+    func `ignores every retired claude web API routines alias`() throws {
         let json = """
         {
           "five_hour": { "utilization": 9, "resets_at": "2025-12-23T16:00:00.000Z" },
-          "seven_day_omelette": { "utilization": 26, "resets_at": "2025-12-30T23:00:00.000Z" },
-          "seven_day_cowork": null
+          "seven_day_routines": { "utilization": 11, "resets_at": "2025-12-31T23:00:00.000Z" },
+          "seven_day_claude_routines": { "utilization": 11, "resets_at": "2025-12-31T23:00:00.000Z" },
+          "claude_routines": { "utilization": 11, "resets_at": "2025-12-31T23:00:00.000Z" },
+          "routines": { "utilization": 11, "resets_at": "2025-12-31T23:00:00.000Z" },
+          "routine": { "utilization": 11, "resets_at": "2025-12-31T23:00:00.000Z" },
+          "seven_day_cowork": { "utilization": 11, "resets_at": "2025-12-31T23:00:00.000Z" },
+          "cowork": { "utilization": 11, "resets_at": "2025-12-31T23:00:00.000Z" }
         }
         """
         let data = Data(json.utf8)
         let parsed = try ClaudeWebAPIFetcher._parseUsageResponseForTesting(data)
-        #expect(parsed.extraRateWindows.contains { $0.id == "claude-routines" } == false)
-        #expect(parsed.extraRateWindows.contains { $0.id == "claude-design" } == false)
+        #expect(parsed.sessionPercentUsed == 9)
+        #expect(parsed.extraRateWindows.isEmpty)
     }
 
     @Test
@@ -307,7 +310,7 @@ struct ClaudeWebUsageExtraWindowTests {
     }
 
     @Test
-    func `orders scoped weekly windows before daily routines`() throws {
+    func `ignores retired routines beside scoped weekly windows`() throws {
         let json = """
         {
           "five_hour": { "utilization": 9, "resets_at": "2026-07-03T00:30:00.440902+00:00" },
@@ -325,11 +328,11 @@ struct ClaudeWebUsageExtraWindowTests {
         """
         let data = Data(json.utf8)
         let parsed = try ClaudeWebAPIFetcher._parseUsageResponseForTesting(data)
-        #expect(parsed.extraRateWindows.map(\.title) == ["Fable only", "Daily Routines"])
+        #expect(parsed.extraRateWindows.map(\.title) == ["Fable only"])
     }
 
     @Test
-    func `keeps multiple scoped weekly windows in payload order before routines`() throws {
+    func `keeps multiple scoped weekly windows in payload order`() throws {
         let json = """
         {
           "five_hour": { "utilization": 9, "resets_at": "2026-07-03T00:30:00.440902+00:00" },
@@ -353,6 +356,6 @@ struct ClaudeWebUsageExtraWindowTests {
         """
         let data = Data(json.utf8)
         let parsed = try ClaudeWebAPIFetcher._parseUsageResponseForTesting(data)
-        #expect(parsed.extraRateWindows.map(\.title) == ["Opus only", "Fable only", "Daily Routines"])
+        #expect(parsed.extraRateWindows.map(\.title) == ["Opus only", "Fable only"])
     }
 }

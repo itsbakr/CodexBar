@@ -632,10 +632,6 @@ extension SettingsStore {
                 "showOptionalCreditsAndExtraUsage",
                 fallback: true,
                 from: userDefaults),
-            claudeDailyRoutinesUsageVisible: Self.loadBoolDefault(
-                "claudeDailyRoutinesUsageVisible",
-                fallback: true,
-                from: userDefaults),
             // Model-scoped weekly rows are opt-in: a fresh install keeps widgets on the standard quota lanes.
             claudeModelScopedWeeklyUsageVisible: userDefaults.object(
                 forKey: "claudeModelScopedWeeklyUsageVisible") as? Bool ?? false,

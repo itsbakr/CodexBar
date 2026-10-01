@@ -1941,9 +1941,9 @@ struct ProviderArchitectureGatekeeperTests {
         AllowedProviderConstruct(
             path: "Sources/CodexBar/MenuCardView+ModelHelpers.swift",
             anchor: "if input.provider == .codex, !input.showOptionalCreditsAndExtraUsage {",
-            expectedProviderIDs: ["claude", "codex", "copilot"],
-            expectedReferenceCount: 4,
-            expectedReferenceFingerprint: ["codex@0", "copilot@3", "codex@6", "claude@11"],
+            expectedProviderIDs: ["codex", "copilot"],
+            expectedReferenceCount: 3,
+            expectedReferenceFingerprint: ["codex@0", "copilot@3", "codex@6"],
             reason: "This exact shared renderer maps provider-owned presentation data into the generic UI model."),
         AllowedProviderConstruct(
             path: "Sources/CodexBar/MenuCardView+ModelHelpers.swift",
@@ -3596,8 +3596,8 @@ struct ProviderArchitectureGatekeeperTests {
             path: "Sources/CodexBarCore/UsageSnapshot+SwitcherWeeklyWindow.swift",
             anchor: "case .claude:",
             expectedProviderIDs: ["claude"],
-            expectedReferenceCount: 2,
-            expectedReferenceFingerprint: ["claude@0", "claude@8"],
+            expectedReferenceCount: 1,
+            expectedReferenceFingerprint: ["claude@0"],
             reason: "This exact shared construct dispatches a provider-owned capability at the generic integration boundary."),
         AllowedProviderConstruct(
             path: "Sources/CodexBarCore/Vendored/CostUsage/CostUsagePricing.swift",

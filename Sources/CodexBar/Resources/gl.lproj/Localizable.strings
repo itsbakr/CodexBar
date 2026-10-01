@@ -147,7 +147,6 @@
 "Cursor login failed" = "O inicio de sesión de Cursor fallou";
 "Custom" = "Personalizado";
 "Custom Path" = "Ruta personalizada";
-"Daily Routines" = "Rutinas diarias";
 "Debug" = "Depuración";
 "Default" = "Por defecto";
 "Disable Keychain access" = "Desactivar o acceso ao Chaveiro";
@@ -1325,8 +1324,6 @@
 "(%d%% risk)" = "(%d%% de risco de esgotamento)";
 "Show Codex Spark usage" = "Amosar o uso de Codex Spark";
 "Shows Codex Spark quota rows in the menu and provider preview. Requires optional credits and extra usage in Display settings." = "Amosa as filas de cota de Codex Spark no menú e na previsualización do provedor. Require activar «Amosar créditos + uso adicional» nos axustes de Pantalla.";
-"Show Daily Routines usage" = "Amosar o uso de Rutinas diarias";
-"Shows the Daily Routines quota row in the menu and provider preview. Requires optional credits and extra usage in Display settings." = "Amosa a fila de cota de Rutinas diarias no menú e na previsualización do provedor. Require activar «Amosar créditos + uso adicional» nos axustes de Pantalla.";
 "Scroll to see more models" = "Desprázate para ver máis modelos";
 
 /* Shareable usage card */

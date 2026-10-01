@@ -637,7 +637,7 @@ extension ClaudeWebAPIFetcher {
         }
 
         if httpResponse.statusCode == 200 {
-            return try self.parseUsageResponse(data, logger: logger)
+            return try self.parseUsageResponse(data)
         }
         throw self.fetchError(response: httpResponse, data: data)
     }
@@ -689,7 +689,7 @@ extension ClaudeWebAPIFetcher {
         return bodyPrefix.localizedCaseInsensitiveContains("Just a moment")
     }
 
-    private static func parseUsageResponse(_ data: Data, logger: ((String) -> Void)? = nil) throws -> WebUsageData {
+    private static func parseUsageResponse(_ data: Data) throws -> WebUsageData {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw FetchError.invalidResponse
         }
@@ -727,10 +727,7 @@ extension ClaudeWebAPIFetcher {
         } else if let sevenDayOpus = json["seven_day_opus"] as? [String: Any] {
             opusPercent = Self.percentValue(from: sevenDayOpus["utilization"])
         }
-        let extraRateParse = ClaudeWebExtraRateWindowParser.parse(from: json)
-        if let sourceKey = extraRateParse.sourceKeys["claude-routines"] {
-            logger?("Usage API extra window key matched: routines=\(sourceKey)")
-        }
+        let extraRateWindows = ClaudeWebExtraRateWindowParser.parse(from: json)
         let extraUsageCost = ClaudeWebExtraUsageCost.parse(from: json["extra_usage"])
         let resetCredits = Self.parseResetCredits(from: json["cedar_ember"])
 
@@ -740,7 +737,7 @@ extension ClaudeWebAPIFetcher {
             weeklyPercentUsed: weeklyPercent,
             weeklyResetsAt: weeklyResets,
             opusPercentUsed: opusPercent,
-            extraRateWindows: extraRateParse.windows,
+            extraRateWindows: extraRateWindows,
             extraUsageCost: extraUsageCost,
             accountOrganization: nil,
             accountEmail: nil,

@@ -264,8 +264,6 @@ struct OAuthUsageResponse: Decodable {
     let sevenDayOAuthApps: OAuthUsageWindow?
     let sevenDayOpus: OAuthUsageWindow?
     let sevenDaySonnet: OAuthUsageWindow?
-    let sevenDayRoutines: OAuthUsageWindow?
-    let sevenDayRoutinesSourceKey: String?
     let iguanaNecktie: OAuthUsageWindow?
     let extraUsage: OAuthExtraUsage?
     /// Newer shape (superseding the flat `seven_day_*` fields above for scoped weekly
@@ -280,17 +278,6 @@ struct OAuthUsageResponse: Decodable {
         self.sevenDayOAuthApps = Self.decodeWindow(in: container, keys: ["seven_day_oauth_apps"])
         self.sevenDayOpus = Self.decodeWindow(in: container, keys: ["seven_day_opus"])
         self.sevenDaySonnet = Self.decodeWindow(in: container, keys: ["seven_day_sonnet"])
-        let routines = Self.decodeWindowWithSource(in: container, keys: [
-            "seven_day_routines",
-            "seven_day_claude_routines",
-            "claude_routines",
-            "routines",
-            "routine",
-            "seven_day_cowork",
-            "cowork",
-        ])
-        self.sevenDayRoutines = routines.window
-        self.sevenDayRoutinesSourceKey = routines.sourceKey
         self.iguanaNecktie = Self.decodeWindow(in: container, keys: ["iguana_necktie"])
         self.extraUsage = Self.decodeValue(in: container, keys: ["extra_usage"])
         self.limits = Self.decodeValue(in: container, keys: ["limits"])
@@ -301,20 +288,6 @@ struct OAuthUsageResponse: Decodable {
         keys: [String]) -> OAuthUsageWindow?
     {
         self.decodeValue(in: container, keys: keys)
-    }
-
-    private static func decodeWindowWithSource(
-        in container: KeyedDecodingContainer<DynamicCodingKey>,
-        keys: [String]) -> (window: OAuthUsageWindow?, sourceKey: String?)
-    {
-        for keyName in keys {
-            guard let key = DynamicCodingKey(stringValue: keyName) else { continue }
-            guard container.contains(key) else { continue }
-            if let value = try? container.decodeIfPresent(OAuthUsageWindow.self, forKey: key) {
-                return (value, keyName)
-            }
-        }
-        return (nil, nil)
     }
 
     private static func decodeValue<T: Decodable>(

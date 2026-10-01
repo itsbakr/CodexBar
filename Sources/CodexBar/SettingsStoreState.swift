@@ -72,7 +72,6 @@ struct SettingsDefaultsState {
     var claudeOAuthDirectKeychainReadAllowed: Bool
     var claudeWebExtrasEnabledRaw: Bool
     var showOptionalCreditsAndExtraUsage: Bool
-    var claudeDailyRoutinesUsageVisible: Bool
     var claudeModelScopedWeeklyUsageVisible: Bool
     var codexSparkUsageVisible: Bool
     var codexExternalOAuthSourcesAllowed: Bool
