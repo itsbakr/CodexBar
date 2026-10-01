@@ -166,7 +166,6 @@
 "Cursor login failed" = "Помилка входу в систему курсору";
 "Custom" = "Користувацький";
 "Custom Path" = "Спеціальний шлях";
-"Daily Routines" = "Розпорядок дня";
 "Debug" = "Налагодження";
 "Default" = "Типово";
 "Disable Keychain access" = "Вимкнути доступ Keychain";
@@ -1311,8 +1310,6 @@
 "section_links" = "Посилання";
 "Show Codex Spark usage" = "Показати використання Codex Spark";
 "Shows Codex Spark quota rows in the menu and provider preview. Requires optional credits and extra usage in Display settings." = "Показує рядки квоти Codex Spark у меню та попередньому перегляді провайдера. Потрібно ввімкнути «Показати кредити + додаткове використання» в налаштуваннях «Відображення».";
-"Show Daily Routines usage" = "Показати використання щоденних завдань";
-"Shows the Daily Routines quota row in the menu and provider preview. Requires optional credits and extra usage in Display settings." = "Показує рядок квоти щоденних завдань у меню та попередньому перегляді провайдера. Потрібно ввімкнути «Показати кредити + додаткове використання» в налаштуваннях «Відображення».";
 "Scroll to see more models" = "Прокрутіть, щоб побачити більше моделей";
 "Copy Image" = "Копіювати зображення";
 "Copy Stats" = "Копіювати статистику";

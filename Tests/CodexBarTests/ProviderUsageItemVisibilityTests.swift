@@ -413,19 +413,52 @@ struct ProviderUsageItemVisibilityTests {
         ])
         let configStore = testConfigStore(suiteName: "visibility-sync-\(UUID().uuidString)")
         let settings = Self.settings(defaults: defaults, configStore: configStore)
-        for (provider, expected) in [
-            (UsageProvider.codex, ["metric:codex-spark", "metric:codex-spark-weekly"]),
-            (.claude, ["metric:claude-routines"]),
-        ] {
-            let config = try #require(settings.providerConfig(for: provider))
-            #expect(ProviderIntentPayload(config: config).hiddenUsageItemIDs == expected)
-            #expect(try configStore.load()?.providerConfig(for: provider.instanceID)?.hiddenUsageItemIDs == expected)
-            settings.restoreDefaultUsageItemVisibility(for: provider)
-        }
+        let expected = ["metric:codex-spark", "metric:codex-spark-weekly"]
+        let config = try #require(settings.providerConfig(for: .codex))
+        #expect(ProviderIntentPayload(config: config).hiddenUsageItemIDs == expected)
+        let codexID = UsageProvider.codex.instanceID
+        #expect(try configStore.load()?.providerConfig(for: codexID)?.hiddenUsageItemIDs == expected)
+        // The retired Claude Daily Routines toggle no longer migrates into a hidden row.
+        #expect(settings.providerConfig(for: .claude)?.hiddenUsageItemIDs == nil)
+        #expect(settings.hiddenUsageItemIDs(for: .claude).isEmpty)
+        settings.restoreDefaultUsageItemVisibility(for: .codex)
         let reloaded = Self.settings(defaults: defaults, configStore: configStore)
         #expect(reloaded.providerConfig(for: .codex)?.hiddenUsageItemIDs == [])
-        #expect(reloaded.providerConfig(for: .claude)?.hiddenUsageItemIDs == [])
+        #expect(reloaded.providerConfig(for: .claude)?.hiddenUsageItemIDs == nil)
         #expect(reloaded.providerConfig(for: .cursor)?.hiddenUsageItemIDs == nil)
+    }
+
+    @Test
+    func `retired hidden routines choice is ignored without rewriting config`() throws {
+        let configStore = testConfigStore(suiteName: "visibility-retired-\(UUID().uuidString)")
+        try configStore.save(CodexBarConfig(providers: UsageProvider.allCases.map {
+            ProviderConfig(
+                id: $0.instanceID,
+                hiddenUsageItemIDs: $0 == .claude ? ["metric:claude-routines", "metric:secondary"] : nil)
+        }))
+        let settings = Self.settings(defaults: InMemoryUserDefaults(), configStore: configStore)
+        defer { settings.configFileWatcher?.stop() }
+
+        #expect(settings.hiddenUsageItemIDs(for: .claude) == [.metric("secondary")])
+        // Compact account rows still drop the retired row that last-known snapshots can carry.
+        #expect(settings.compactAccountHiddenMetricIDs(for: .claude) == ["claude-routines", "secondary"])
+        let descriptors = Self.model(provider: .claude, metricIDs: ["primary"])
+            .usageItemDescriptors(includingHidden: settings.hiddenUsageItemIDs(for: .claude))
+        #expect(descriptors.map(\.id.rawValue) == ["metric:primary", "metric:secondary"])
+        #expect(settings.providerConfig(for: .claude)?.hiddenUsageItemIDs == [
+            "metric:claude-routines",
+            "metric:secondary",
+        ])
+
+        settings.setUsageItemVisible(false, itemID: .metric("primary"), for: .claude)
+
+        // Edits keep the retired choice stored so synced Macs on older versions keep hiding that row.
+        #expect(settings.hiddenUsageItemIDs(for: .claude) == [.metric("primary"), .metric("secondary")])
+        #expect(settings.providerConfig(for: .claude)?.hiddenUsageItemIDs == [
+            "metric:claude-routines",
+            "metric:primary",
+            "metric:secondary",
+        ])
     }
 
     static func settings(

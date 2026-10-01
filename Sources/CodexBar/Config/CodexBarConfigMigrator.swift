@@ -106,10 +106,9 @@ struct CodexBarConfigMigrator {
         config: inout CodexBarConfig,
         state: inout MigrationState)
     {
-        // Provider-specific by design: upgrade the two retired visibility toggles before sync reads config.
+        // Provider-specific by design: upgrade the retired Codex Spark visibility toggle before sync reads config.
         let legacySelections: [(UsageProvider, String, [String])] = [
             (.codex, "codexSparkUsageVisible", ["metric:codex-spark", "metric:codex-spark-weekly"]),
-            (.claude, "claudeDailyRoutinesUsageVisible", ["metric:claude-routines"]),
         ]
         for (provider, key, hiddenIDs) in legacySelections {
             guard userDefaults.object(forKey: key) as? Bool == false,

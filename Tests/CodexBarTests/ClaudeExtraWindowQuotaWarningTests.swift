@@ -40,7 +40,7 @@ struct ClaudeExtraWindowQuotaWarningTests {
     }
 
     @Test
-    func `claude scoped weekly and routines extra windows fire independent weekly warnings`() {
+    func `claude sibling scoped weekly windows fire independent weekly warnings`() {
         let settings = self.makeSettings(suiteName: "ClaudeExtraWindowQuotaWarningTests-independent")
         settings.refreshFrequency = .manual
         settings.statusChecksEnabled = false
@@ -49,7 +49,6 @@ struct ClaudeExtraWindowQuotaWarningTests {
         settings.setQuotaWarningWindowEnabled(.session, enabled: true)
         settings.setQuotaWarningWindowEnabled(.weekly, enabled: true)
         settings.showOptionalCreditsAndExtraUsage = false
-        settings.claudeDailyRoutinesUsageVisible = false
 
         let notifier = SessionQuotaNotifierSpy()
         let store = UsageStore(
@@ -60,19 +59,19 @@ struct ClaudeExtraWindowQuotaWarningTests {
 
         store.handleQuotaWarningTransitions(
             provider: .claude,
-            snapshot: self.claudeExtraWindowSnapshot(fableUsed: 40, routinesUsed: 40))
+            snapshot: self.claudeExtraWindowSnapshot(fableUsed: 40, otherModelUsed: 40))
         store.handleQuotaWarningTransitions(
             provider: .claude,
-            snapshot: self.claudeExtraWindowSnapshot(fableUsed: 55, routinesUsed: 55))
+            snapshot: self.claudeExtraWindowSnapshot(fableUsed: 55, otherModelUsed: 55))
 
         #expect(notifier.quotaWarningPosts.count == 2)
         let fable = notifier.quotaWarningPosts.first { $0.event.windowID == "claude-weekly-scoped-fable" }
-        let routines = notifier.quotaWarningPosts.first { $0.event.windowID == "claude-routines" }
+        let otherModel = notifier.quotaWarningPosts.first { $0.event.windowID == Self.otherModelWindowID }
         #expect(fable?.event.window == .weekly)
         #expect(fable?.event.threshold == 50)
         #expect(fable?.event.windowDisplayLabel == "Fable only")
-        #expect(routines?.event.threshold == 50)
-        #expect(routines?.event.windowDisplayLabel == "Daily Routines")
+        #expect(otherModel?.event.threshold == 50)
+        #expect(otherModel?.event.windowDisplayLabel == "Example Model only")
 
         // Each window keeps independent fired-threshold state instead of clobbering the shared weekly key.
         let fableKey = UsageStore.QuotaWarningStateKey(
@@ -80,13 +79,53 @@ struct ClaudeExtraWindowQuotaWarningTests {
             window: .weekly,
             accountDiscriminator: nil,
             windowID: "claude-weekly-scoped-fable")
-        let routinesKey = UsageStore.QuotaWarningStateKey(
+        let otherModelKey = UsageStore.QuotaWarningStateKey(
             provider: .claude,
             window: .weekly,
             accountDiscriminator: nil,
-            windowID: "claude-routines")
+            windowID: Self.otherModelWindowID)
         #expect(store.quotaWarningState[fableKey]?.firedThresholds.contains(50) == true)
-        #expect(store.quotaWarningState[routinesKey]?.firedThresholds.contains(50) == true)
+        #expect(store.quotaWarningState[otherModelKey]?.firedThresholds.contains(50) == true)
+    }
+
+    @Test
+    func `retired routines window does not post a quota warning`() {
+        let settings = self.makeSettings(suiteName: "ClaudeExtraWindowQuotaWarningTests-retired-routines")
+        settings.refreshFrequency = .manual
+        settings.statusChecksEnabled = false
+        settings.quotaWarningNotificationsEnabled = true
+        settings.quotaWarningThresholds = [50]
+        settings.setQuotaWarningWindowEnabled(.weekly, enabled: true)
+
+        let notifier = SessionQuotaNotifierSpy()
+        let store = UsageStore(
+            fetcher: UsageFetcher(),
+            browserDetection: BrowserDetection(cacheTTL: 0),
+            settings: settings,
+            sessionQuotaNotifier: notifier)
+
+        /// Older synced snapshots can still carry the retired Daily Routines row.
+        func snapshot(used: Double) -> UsageSnapshot {
+            UsageSnapshot(
+                primary: nil,
+                secondary: nil,
+                extraRateWindows: [
+                    NamedRateWindow(
+                        id: "claude-routines",
+                        title: "Daily Routines",
+                        window: RateWindow(
+                            usedPercent: used,
+                            windowMinutes: 7 * 24 * 60,
+                            resetsAt: nil,
+                            resetDescription: nil)),
+                ],
+                updatedAt: Date())
+        }
+        store.handleQuotaWarningTransitions(provider: .claude, snapshot: snapshot(used: 40))
+        store.handleQuotaWarningTransitions(provider: .claude, snapshot: snapshot(used: 55))
+
+        #expect(notifier.quotaWarningPosts.isEmpty)
+        #expect(!store.quotaWarningState.keys.contains { $0.windowID == "claude-routines" })
     }
 
     @Test
@@ -145,13 +184,13 @@ struct ClaudeExtraWindowQuotaWarningTests {
 
         // 60% remaining -> 45% (fires 50) -> 60% (clears 50) -> 45% (refires 50).
         store.handleQuotaWarningTransitions(
-            provider: .claude, snapshot: self.claudeExtraWindowSnapshot(fableUsed: 40, routinesUsed: nil))
+            provider: .claude, snapshot: self.claudeExtraWindowSnapshot(fableUsed: 40, otherModelUsed: nil))
         store.handleQuotaWarningTransitions(
-            provider: .claude, snapshot: self.claudeExtraWindowSnapshot(fableUsed: 55, routinesUsed: nil))
+            provider: .claude, snapshot: self.claudeExtraWindowSnapshot(fableUsed: 55, otherModelUsed: nil))
         store.handleQuotaWarningTransitions(
-            provider: .claude, snapshot: self.claudeExtraWindowSnapshot(fableUsed: 40, routinesUsed: nil))
+            provider: .claude, snapshot: self.claudeExtraWindowSnapshot(fableUsed: 40, otherModelUsed: nil))
         store.handleQuotaWarningTransitions(
-            provider: .claude, snapshot: self.claudeExtraWindowSnapshot(fableUsed: 55, routinesUsed: nil))
+            provider: .claude, snapshot: self.claudeExtraWindowSnapshot(fableUsed: 55, otherModelUsed: nil))
 
         #expect(notifier.quotaWarningPosts.count == 2)
         #expect(notifier.quotaWarningPosts.allSatisfy { $0.event.windowID == "claude-weekly-scoped-fable" })
@@ -174,28 +213,28 @@ struct ClaudeExtraWindowQuotaWarningTests {
             sessionQuotaNotifier: notifier)
 
         store.handleQuotaWarningTransitions(
-            provider: .claude, snapshot: self.claudeExtraWindowSnapshot(fableUsed: 40, routinesUsed: 40))
+            provider: .claude, snapshot: self.claudeExtraWindowSnapshot(fableUsed: 40, otherModelUsed: 40))
         store.handleQuotaWarningTransitions(
-            provider: .claude, snapshot: self.claudeExtraWindowSnapshot(fableUsed: 55, routinesUsed: 55))
+            provider: .claude, snapshot: self.claudeExtraWindowSnapshot(fableUsed: 55, otherModelUsed: 55))
         let fableKey = UsageStore.QuotaWarningStateKey(
             provider: .claude,
             window: .weekly,
             accountDiscriminator: nil,
             windowID: "claude-weekly-scoped-fable")
-        let routinesKey = UsageStore.QuotaWarningStateKey(
+        let otherModelKey = UsageStore.QuotaWarningStateKey(
             provider: .claude,
             window: .weekly,
             accountDiscriminator: nil,
-            windowID: "claude-routines")
+            windowID: Self.otherModelWindowID)
         #expect(store.quotaWarningState[fableKey] != nil)
-        #expect(store.quotaWarningState[routinesKey] != nil)
+        #expect(store.quotaWarningState[otherModelKey] != nil)
 
-        // Fable ends while Routines is still present: this refresh carries authoritative extras, so
-        // Fable's stale state is dropped and Routines is kept.
+        // Fable ends while the sibling scoped window is still present: this refresh carries authoritative
+        // extras, so Fable's stale state is dropped and the sibling's state is kept.
         store.handleQuotaWarningTransitions(
-            provider: .claude, snapshot: self.claudeExtraWindowSnapshot(fableUsed: nil, routinesUsed: 55))
+            provider: .claude, snapshot: self.claudeExtraWindowSnapshot(fableUsed: nil, otherModelUsed: 55))
         #expect(store.quotaWarningState[fableKey] == nil)
-        #expect(store.quotaWarningState[routinesKey] != nil)
+        #expect(store.quotaWarningState[otherModelKey] != nil)
     }
 
     @Test
@@ -216,11 +255,11 @@ struct ClaudeExtraWindowQuotaWarningTests {
 
         store.handleQuotaWarningTransitions(
             provider: .claude,
-            snapshot: self.claudeExtraWindowSnapshot(fableUsed: 40, routinesUsed: nil),
+            snapshot: self.claudeExtraWindowSnapshot(fableUsed: 40, otherModelUsed: nil),
             accountDiscriminator: "account-a")
         store.handleQuotaWarningTransitions(
             provider: .claude,
-            snapshot: self.claudeExtraWindowSnapshot(fableUsed: 55, routinesUsed: nil),
+            snapshot: self.claudeExtraWindowSnapshot(fableUsed: 55, otherModelUsed: nil),
             accountDiscriminator: "account-a")
         let accountAFableKey = UsageStore.QuotaWarningStateKey(
             provider: .claude,
@@ -231,13 +270,13 @@ struct ClaudeExtraWindowQuotaWarningTests {
 
         store.handleQuotaWarningTransitions(
             provider: .claude,
-            snapshot: self.claudeExtraWindowSnapshot(fableUsed: nil, routinesUsed: 40),
+            snapshot: self.claudeExtraWindowSnapshot(fableUsed: nil, otherModelUsed: 40),
             accountDiscriminator: "account-b")
         #expect(store.quotaWarningState[accountAFableKey] != nil)
 
         store.handleQuotaWarningTransitions(
             provider: .claude,
-            snapshot: self.claudeExtraWindowSnapshot(fableUsed: 55, routinesUsed: nil),
+            snapshot: self.claudeExtraWindowSnapshot(fableUsed: 55, otherModelUsed: nil),
             accountDiscriminator: "account-a")
 
         #expect(notifier.quotaWarningPosts.count == 1)
@@ -265,7 +304,7 @@ struct ClaudeExtraWindowQuotaWarningTests {
         for accountID in accountIDs {
             store.handleQuotaWarningTransitions(
                 provider: .claude,
-                snapshot: self.claudeExtraWindowSnapshot(fableUsed: 40, routinesUsed: 40),
+                snapshot: self.claudeExtraWindowSnapshot(fableUsed: 40, otherModelUsed: 40),
                 accountDiscriminator: accountID)
         }
         let seededKeys = accountIDs.flatMap { accountID in
@@ -279,7 +318,7 @@ struct ClaudeExtraWindowQuotaWarningTests {
                     provider: .claude,
                     window: .weekly,
                     accountDiscriminator: accountID,
-                    windowID: "claude-routines"),
+                    windowID: Self.otherModelWindowID),
             ]
         }
         #expect(seededKeys.allSatisfy { store.quotaWarningState[$0] != nil })
@@ -310,9 +349,9 @@ struct ClaudeExtraWindowQuotaWarningTests {
 
         // Fable crosses 50% and warns once.
         store.handleQuotaWarningTransitions(
-            provider: .claude, snapshot: self.claudeExtraWindowSnapshot(fableUsed: 40, routinesUsed: nil))
+            provider: .claude, snapshot: self.claudeExtraWindowSnapshot(fableUsed: 40, otherModelUsed: nil))
         store.handleQuotaWarningTransitions(
-            provider: .claude, snapshot: self.claudeExtraWindowSnapshot(fableUsed: 55, routinesUsed: nil))
+            provider: .claude, snapshot: self.claudeExtraWindowSnapshot(fableUsed: 55, otherModelUsed: nil))
         #expect(notifier.quotaWarningPosts.count == 1)
         let fableKey = UsageStore.QuotaWarningStateKey(
             provider: .claude,
@@ -328,11 +367,13 @@ struct ClaudeExtraWindowQuotaWarningTests {
         #expect(store.quotaWarningState[fableKey] != nil)
 
         store.handleQuotaWarningTransitions(
-            provider: .claude, snapshot: self.claudeExtraWindowSnapshot(fableUsed: 55, routinesUsed: nil))
+            provider: .claude, snapshot: self.claudeExtraWindowSnapshot(fableUsed: 55, otherModelUsed: nil))
         #expect(notifier.quotaWarningPosts.count == 1)
     }
 
-    private func claudeExtraWindowSnapshot(fableUsed: Double?, routinesUsed: Double?) -> UsageSnapshot {
+    private static let otherModelWindowID = "claude-weekly-scoped-example-model"
+
+    private func claudeExtraWindowSnapshot(fableUsed: Double?, otherModelUsed: Double?) -> UsageSnapshot {
         var windows: [NamedRateWindow] = []
         if let fableUsed {
             windows.append(NamedRateWindow(
@@ -341,12 +382,12 @@ struct ClaudeExtraWindowQuotaWarningTests {
                 window: RateWindow(
                     usedPercent: fableUsed, windowMinutes: 7 * 24 * 60, resetsAt: nil, resetDescription: nil)))
         }
-        if let routinesUsed {
+        if let otherModelUsed {
             windows.append(NamedRateWindow(
-                id: "claude-routines",
-                title: "Daily Routines",
+                id: Self.otherModelWindowID,
+                title: "Example Model only",
                 window: RateWindow(
-                    usedPercent: routinesUsed, windowMinutes: 7 * 24 * 60, resetsAt: nil, resetDescription: nil)))
+                    usedPercent: otherModelUsed, windowMinutes: 7 * 24 * 60, resetsAt: nil, resetDescription: nil)))
         }
         return UsageSnapshot(primary: nil, secondary: nil, extraRateWindows: windows, updatedAt: Date())
     }

@@ -928,11 +928,8 @@ extension UsageMenuCardView.Model {
         } else {
             extraRateWindows
         }
-        if input.provider == .claude,
-           !input.showOptionalCreditsAndExtraUsage || !input.claudeDailyRoutinesUsageVisible
-        {
-            visibleRateWindows.removeAll(where: Self.isClaudeDailyRoutinesRateWindow)
-        }
+        // Older synced snapshots can still carry rows that providers no longer report.
+        visibleRateWindows.removeAll { ProviderUsageItemID.retiredMetricIDs.contains($0.id) }
         return visibleRateWindows.map { namedWindow in
             let paceDetail = Self.extraRateWindowPaceDetail(
                 provider: input.provider,
@@ -1020,10 +1017,6 @@ extension UsageMenuCardView.Model {
         let total = String(capPhrase.dropFirst(3))
         guard !total.isEmpty else { return nil }
         return String(format: L("%@ of %@ credits left"), remaining, total)
-    }
-
-    private static func isClaudeDailyRoutinesRateWindow(_ namedWindow: NamedRateWindow) -> Bool {
-        namedWindow.id == "claude-routines"
     }
 
     private static let antigravityQuotaSummaryWindowIDPrefix = "antigravity-quota-summary-"

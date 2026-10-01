@@ -149,7 +149,6 @@
 "Cursor login failed" = "Login Cursor gagal";
 "Custom" = "Kustom";
 "Custom Path" = "Path Kustom";
-"Daily Routines" = "Rutinitas Harian";
 "Debug" = "Debug";
 "Default" = "Bawaan";
 "Disable Keychain access" = "Nonaktifkan akses Keychain";
@@ -1329,8 +1328,6 @@
 "section_links" = "Tautan";
 "Show Codex Spark usage" = "Tampilkan penggunaan Codex Spark";
 "Shows Codex Spark quota rows in the menu and provider preview. Requires optional credits and extra usage in Display settings." = "Menampilkan baris kuota Codex Spark di menu dan pratinjau penyedia. Mengharuskan “Tampilkan kredit + penggunaan ekstra” diaktifkan di pengaturan Tampilan.";
-"Show Daily Routines usage" = "Tampilkan penggunaan Rutinitas Harian";
-"Shows the Daily Routines quota row in the menu and provider preview. Requires optional credits and extra usage in Display settings." = "Menampilkan baris kuota Rutinitas Harian di menu dan pratinjau penyedia. Mengharuskan “Tampilkan kredit + penggunaan ekstra” diaktifkan di pengaturan Tampilan.";
 "Scroll to see more models" = "Gulir untuk melihat model lainnya";
 
 /* Shareable usage card */

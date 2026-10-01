@@ -31,7 +31,7 @@ extension StatusMenuTests {
     }
 
     @Test
-    func `status menu card follows claude daily routines visibility`() throws {
+    func `status menu card follows claude scoped weekly visibility`() throws {
         let settings = self.makeSettings()
         settings.statusChecksEnabled = false
         settings.refreshFrequency = .manual
@@ -56,8 +56,8 @@ extension StatusMenuTests {
                             resetsAt: now.addingTimeInterval(3600),
                             resetDescription: nil)),
                     NamedRateWindow(
-                        id: "claude-routines",
-                        title: "Daily Routines",
+                        id: "claude-weekly-scoped-example-model",
+                        title: "Example Model only",
                         window: RateWindow(
                             usedPercent: 40,
                             windowMinutes: 10080,
@@ -75,12 +75,14 @@ extension StatusMenuTests {
             statusBar: self.makeStatusBarForTesting())
         defer { controller.releaseStatusItemsForTesting() }
 
-        #expect(controller.menuCardModel(for: .claude)?.metrics.contains { $0.id == "claude-routines" } == true)
+        let visibleModel = try #require(controller.menuCardModel(for: .claude))
+        #expect(visibleModel.metrics.contains { $0.id == "claude-weekly-scoped-fable" })
 
-        settings.setUsageItemVisible(false, itemID: .metric("claude-routines"), for: .claude)
+        settings.setUsageItemVisible(false, itemID: .metric("claude-weekly-scoped-fable"), for: .claude)
         let hiddenModel = try #require(controller.menuCardModel(for: .claude))
-        #expect(!hiddenModel.metrics.contains { $0.id == "claude-routines" })
-        #expect(hiddenModel.metrics.contains { $0.id == "claude-weekly-scoped-fable" })
+        #expect(!hiddenModel.metrics.contains { $0.id == "claude-weekly-scoped-fable" })
+        #expect(hiddenModel.metrics.contains { $0.id == "claude-weekly-scoped-example-model" })
+        #expect(hiddenModel.metrics.contains { $0.id == "primary" })
     }
 
     @Test

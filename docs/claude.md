@@ -164,12 +164,13 @@ the cookie import.
   - `limits[].weekly_scoped` → model-specific weekly windows; generic `All models` scopes stay in the main weekly row.
   - The menu localizes scoped titles as a model name plus weekly duration; canonical snapshot and CLI titles remain unchanged.
   - Automatic and Session + Weekly menu bar metrics fall back to the most constrained known scoped weekly window when the regular quota windows are missing. Unknown scoped measurements remain unavailable; Extra usage stays a spend-only fallback.
-  - `seven_day_routines` / `seven_day_cowork` → Daily Routines extra window.
+  - Daily Routines/Cowork keys (`seven_day_routines`, `seven_day_cowork`, and their aliases) are ignored. Claude's
+    extra rows are the model-scoped weekly windows above (for example, Fable weekly).
   - Claude Design/Omelette keys are ignored because Claude Design shares the main Claude usage limit.
   - `extra_usage` → Extra usage cost (monthly spend/limit).
-- Preferences → Providers → Claude → Visible usage items lets you hide the Daily Routines row in menus, the Settings
-  preview, and Overview. The global optional credits and extra usage setting remains its master switch. Hiding this
-  row does not change fetching, history, notifications, widgets, model-scoped weekly limits, hooks, or CLI output.
+- Preferences → Providers → Claude → Visible usage items lets you hide individual model-scoped weekly rows (for
+  example, Fable weekly) in menus, the Settings preview, and Overview. Hiding a row does not change fetching, history,
+  notifications, widgets, hooks, or CLI output. A saved choice to hide the retired Daily Routines row is ignored.
 - Preferences → Providers → Claude → Show model-specific weekly usage in widgets controls model-scoped weekly quota
   rows in desktop widgets. It is off by default; turning it on displays every known Claude window with a
   `claude-weekly-scoped-` identifier (for example, Fable). Turning it back off also drops scoped rows that a previous
@@ -235,7 +236,8 @@ the cookie import.
 - Outputs:
   - Session + weekly + model-specific percent used.
   - A missing session measurement does not render as 100% remaining. Measured weekly and extra windows stay visible; when only a synthetic session placeholder exists, menus and plain CLI output report that limits are unavailable. Raw JSON retains the placeholder for diagnostics.
-  - Daily Routines extra window when returned by the usage API.
+  - Model-scoped weekly extra windows (for example, Fable weekly) when returned by the usage API; Daily
+    Routines/Cowork keys are ignored.
   - Extra usage spend/limit (if enabled).
   - Remaining Usage credits balance (if enabled).
   - Account email + inferred plan.

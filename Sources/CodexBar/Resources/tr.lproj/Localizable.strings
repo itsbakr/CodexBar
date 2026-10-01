@@ -149,7 +149,6 @@
 "Cursor login failed" = "Cursor girişi başarısız";
 "Custom" = "Özel";
 "Custom Path" = "Özel yol";
-"Daily Routines" = "Günlük rutinler";
 "Debug" = "Hata ayıklama";
 "Default" = "Varsayılan";
 "Disable Keychain access" = "Anahtar Zinciri erişimini devre dışı bırak";
@@ -1327,8 +1326,6 @@
 "section_links" = "Bağlantılar";
 "Show Codex Spark usage" = "Codex Spark kullanımını göster";
 "Shows Codex Spark quota rows in the menu and provider preview. Requires optional credits and extra usage in Display settings." = "Codex Spark kota satırlarını menüde ve sağlayıcı önizlemesinde gösterir. Görünüm ayarlarında “Krediler + ek kullanımı göster” seçeneğinin etkin olmasını gerektirir.";
-"Show Daily Routines usage" = "Günlük rutinler kullanımını göster";
-"Shows the Daily Routines quota row in the menu and provider preview. Requires optional credits and extra usage in Display settings." = "Günlük rutinler kota satırını menüde ve sağlayıcı önizlemesinde gösterir. Görünüm ayarlarında “Krediler + ek kullanımı göster” seçeneğinin etkin olmasını gerektirir.";
 "Scroll to see more models" = "Daha fazla model görmek için kaydırın";
 
 /* Shareable usage card */

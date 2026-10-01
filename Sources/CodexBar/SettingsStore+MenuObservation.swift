@@ -67,7 +67,6 @@ extension SettingsStore {
         _ = self.claudeWebExtrasEnabled
         _ = self.copilotBudgetExtrasEnabled
         _ = self.showOptionalCreditsAndExtraUsage
-        _ = self.claudeDailyRoutinesUsageVisible
         _ = self.claudeModelScopedWeeklyUsageVisible
         _ = self.codexSparkUsageVisible
         _ = self.openAIWebAccessEnabled

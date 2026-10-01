@@ -1054,7 +1054,7 @@ extension ClaudeUsageFetcher {
                     primaryWindowKind: .spendLimit,
                     secondary: nil,
                     opus: nil,
-                    extraRateWindows: Self.oauthExtraRateWindows(from: usage),
+                    extraRateWindows: Self.oauthScopedWeeklyLimitWindows(from: usage),
                     providerCost: providerCost,
                     updatedAt: Date(),
                     accountEmail: nil,
@@ -1075,7 +1075,7 @@ extension ClaudeUsageFetcher {
         let modelSpecific = makeWindow(
             usage.sevenDaySonnet ?? usage.sevenDayOpus,
             windowMinutes: 7 * 24 * 60)
-        let extraRateWindows = Self.oauthExtraRateWindows(from: usage)
+        let extraRateWindows = Self.oauthScopedWeeklyLimitWindows(from: usage)
 
         return ClaudeUsageSnapshot(
             primary: primary,
@@ -1151,31 +1151,6 @@ extension ClaudeUsageFetcher {
         // Always convert to dollars (major units) for display consistency.
         // See: ClaudeWebAPIFetcher.swift which always divides by 100.
         return (used: used / 100.0, limit: limit / 100.0)
-    }
-
-    private static func oauthExtraRateWindows(from usage: OAuthUsageResponse) -> [NamedRateWindow] {
-        let definitions: [(id: String, title: String, window: OAuthUsageWindow?)] = [
-            (id: "claude-routines", title: "Daily Routines", window: usage.sevenDayRoutines),
-        ]
-        if let routinesKey = usage.sevenDayRoutinesSourceKey {
-            Self.log.debug("Claude OAuth extra usage key matched: routines=\(routinesKey)")
-        }
-        let routineWindows: [NamedRateWindow] = definitions.compactMap { definition in
-            guard let window = definition.window, let utilization = window.utilization else { return nil }
-            let resetDate = ISO8601DateParser.parse(window.resetsAt)
-            let resetDescription = resetDate.map(Self.formatResetDate)
-            return NamedRateWindow(
-                id: definition.id,
-                title: definition.title,
-                window: RateWindow(
-                    usedPercent: utilization,
-                    windowMinutes: Self.weeklyWindowMinutes,
-                    resetsAt: resetDate,
-                    resetDescription: resetDescription))
-        }
-        // Keep the same row order as the Web path: model-scoped weekly limits first,
-        // Daily Routines last.
-        return Self.oauthScopedWeeklyLimitWindows(from: usage) + routineWindows
     }
 
     private static func oauthScopedWeeklyLimitWindows(from usage: OAuthUsageResponse) -> [NamedRateWindow] {

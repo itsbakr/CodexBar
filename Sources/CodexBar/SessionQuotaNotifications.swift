@@ -88,7 +88,7 @@ struct QuotaWarningEvent: Equatable {
     /// session/weekly lanes.
     let windowID: String?
     /// Human-facing window label to render instead of the generic session/weekly name
-    /// (e.g. "Fable only", "Daily Routines"). `nil` falls back to the localized lane name.
+    /// (e.g. "Fable only"). `nil` falls back to the localized lane name.
     let windowDisplayLabel: String?
 
     init(
