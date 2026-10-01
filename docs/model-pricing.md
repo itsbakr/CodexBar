@@ -56,6 +56,14 @@ Dated Codex usage retains the prior bundled GPT-5.6 Sol rates before **2026-08-2
 [OpenAI changelog](https://developers.openai.com/api/docs/changelog). Current and undated usage use the published
 current rates. Terra and Luna retain their separate July 30 cutoff. Custom-pricing overlays retain precedence.
 
+Bundled Claude fallback rows price models that models.dev lacks. They follow
+[Anthropic's pricing page](https://platform.claude.com/docs/en/about-claude/pricing) as of **2026-10-01**.
+Claude 4.6 and later models bill the full context window at standard rates. Dated Opus 4.6 and Sonnet 4.6 usage
+always uses the bundled rates, with the earlier long-context premium before **2026-03-13 UTC**. One-hour cache
+writes cost 2x input.
+Cache hits cost 0.025x input on Fable 5.1 and Mythos 5.1 and 0.05x input on Opus 5.5. Fast-mode
+(`usage.speed` `"fast"`) and US data-residency (`inference_geo` `"us"`) premiums are not applied.
+
 ### Explicit provider identity in OpenCodex
 
 OpenCodex estimates use the recorded provider and model together. An unqualified model on `opencode-go`

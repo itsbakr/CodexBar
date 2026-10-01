@@ -239,6 +239,7 @@ enum CostUsagePricing {
     }
 
     private static let claude: [String: ClaudePricing] = [
+        // https://platform.claude.com/docs/en/about-claude/pricing (2026-10-01). 1h writes = 2x input (claudeCostUSD).
         "claude-fable-5": ClaudePricing(
             inputCostPerToken: 1e-5,
             outputCostPerToken: 5e-5,
@@ -249,6 +250,8 @@ enum CostUsagePricing {
             outputCostPerTokenAboveThreshold: nil,
             cacheCreationInputCostPerTokenAboveThreshold: nil,
             cacheReadInputCostPerTokenAboveThreshold: nil),
+        // cache hits 0.025x input
+        "claude-fable-5-1": ClaudePricing(input: 1e-5, output: 5e-5, cacheWrite: 1.25e-5, cacheRead: 2.5e-7),
         "claude-haiku-4-5-20251001": ClaudePricing(
             inputCostPerToken: 1e-6,
             outputCostPerToken: 5e-6,
@@ -269,6 +272,10 @@ enum CostUsagePricing {
             outputCostPerTokenAboveThreshold: nil,
             cacheCreationInputCostPerTokenAboveThreshold: nil,
             cacheReadInputCostPerTokenAboveThreshold: nil),
+        // Project Glasswing models are invitation-only but publicly priced.
+        "claude-mythos-5": ClaudePricing(input: 1e-5, output: 5e-5, cacheWrite: 1.25e-5, cacheRead: 1e-6),
+        // cache hits 0.025x input
+        "claude-mythos-5-1": ClaudePricing(input: 1e-5, output: 5e-5, cacheWrite: 1.25e-5, cacheRead: 2.5e-7),
         "claude-opus-4-5-20251101": ClaudePricing(
             inputCostPerToken: 5e-6,
             outputCostPerToken: 2.5e-5,
@@ -329,6 +336,9 @@ enum CostUsagePricing {
             outputCostPerTokenAboveThreshold: nil,
             cacheCreationInputCostPerTokenAboveThreshold: nil,
             cacheReadInputCostPerTokenAboveThreshold: nil),
+        "claude-opus-5": ClaudePricing(input: 5e-6, output: 2.5e-5, cacheWrite: 6.25e-6, cacheRead: 5e-7),
+        // cache hits 0.05x input
+        "claude-opus-5-5": ClaudePricing(input: 4e-6, output: 2e-5, cacheWrite: 5e-6, cacheRead: 2e-7),
         "claude-sonnet-4-5": ClaudePricing(
             inputCostPerToken: 3e-6,
             outputCostPerToken: 1.5e-5,
@@ -349,6 +359,9 @@ enum CostUsagePricing {
             outputCostPerTokenAboveThreshold: nil,
             cacheCreationInputCostPerTokenAboveThreshold: nil,
             cacheReadInputCostPerTokenAboveThreshold: nil),
+        // The $2/$10 launch price became standard; the scheduled September increase did not happen.
+        "claude-sonnet-5": ClaudePricing(input: 2e-6, output: 1e-5, cacheWrite: 2.5e-6, cacheRead: 2e-7),
+        "claude-sonnet-5-5": ClaudePricing(input: 2e-6, output: 1e-5, cacheWrite: 2.5e-6, cacheRead: 2e-7),
         "claude-sonnet-4-5-20250929": ClaudePricing(
             inputCostPerToken: 3e-6,
             outputCostPerToken: 1.5e-5,
@@ -851,6 +864,22 @@ enum CostUsagePricing {
             providerID: providerID,
             modelID: model,
             cacheRoot: cacheRoot)
+    }
+}
+
+extension CostUsagePricing.ClaudePricing {
+    /// Claude 4.6+ models bill the full context window at standard rates.
+    init(input: Double, output: Double, cacheWrite: Double, cacheRead: Double) {
+        self.init(
+            inputCostPerToken: input,
+            outputCostPerToken: output,
+            cacheCreationInputCostPerToken: cacheWrite,
+            cacheReadInputCostPerToken: cacheRead,
+            thresholdTokens: nil,
+            inputCostPerTokenAboveThreshold: nil,
+            outputCostPerTokenAboveThreshold: nil,
+            cacheCreationInputCostPerTokenAboveThreshold: nil,
+            cacheReadInputCostPerTokenAboveThreshold: nil)
     }
 }
 

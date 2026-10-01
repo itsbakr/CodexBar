@@ -45,6 +45,98 @@ struct CostUsageScannerClaudeFableTests {
     }
 
     @Test
+    func `claude fable 5 1 row prices cache hits at the reduced rate`() throws {
+        let env = try CostUsageTestEnvironment()
+        defer { env.cleanup() }
+
+        let day = try env.makeLocalNoon(year: 2026, month: 6, day: 9)
+        let fileURL = try env.writeClaudeProjectFile(
+            relativePath: "project-a/fable-5-1.jsonl",
+            contents: env.jsonl([
+                [
+                    "message": [
+                        "model": "claude-fable-5-1",
+                        "id": "msg_fable_5_1",
+                        "type": "message",
+                        "role": "assistant",
+                        "usage": [
+                            "input_tokens": 100,
+                            "cache_creation_input_tokens": 10,
+                            "cache_read_input_tokens": 20,
+                            "output_tokens": 5,
+                        ],
+                    ],
+                    "requestId": "req_fable_5_1",
+                    "type": "assistant",
+                    "timestamp": "2026-06-09T12:00:00.000Z",
+                    "sessionId": "session_fable_5_1",
+                ],
+            ]))
+
+        let parsed = CostUsageScanner.parseClaudeFile(
+            fileURL: fileURL,
+            range: CostUsageScanner.CostUsageDayRange(since: day, until: day),
+            providerFilter: .all,
+            modelsDevCacheRoot: env.cacheRoot)
+
+        #expect(parsed.rows.count == 1)
+        #expect(parsed.rows[0].model == "claude-fable-5-1")
+        // 100 * $10 + 10 * $12.50 + 20 * $0.25 + 5 * $50 per million tokens.
+        let expected = 0.00138
+        #expect(abs((Double(parsed.rows[0].costNanos) / 1_000_000_000) - expected) < 0.000000001)
+    }
+
+    @Test
+    func `claude opus 5 5 transcript row prices one hour cache writes`() throws {
+        let env = try CostUsageTestEnvironment()
+        defer { env.cleanup() }
+
+        let day = try env.makeLocalNoon(year: 2026, month: 6, day: 9)
+        let fileURL = try env.writeClaudeProjectFile(
+            relativePath: "project-a/opus-5-5-cache-ttl.jsonl",
+            contents: env.jsonl([
+                [
+                    "message": [
+                        "model": "claude-opus-5-5",
+                        "id": "msg_opus_5_5_cache_ttl",
+                        "type": "message",
+                        "role": "assistant",
+                        "usage": [
+                            "input_tokens": 2,
+                            "cache_creation_input_tokens": 35194,
+                            "cache_creation": [
+                                "ephemeral_5m_input_tokens": 0,
+                                "ephemeral_1h_input_tokens": 35194,
+                            ],
+                            "cache_read_input_tokens": 10840,
+                            "output_tokens": 457,
+                            "service_tier": "standard",
+                            "speed": "standard",
+                        ],
+                    ],
+                    "requestId": "req_opus_5_5_cache_ttl",
+                    "type": "assistant",
+                    "timestamp": "2026-06-09T12:00:00.000Z",
+                    "sessionId": "session_opus_5_5_cache_ttl",
+                ],
+            ]))
+
+        let parsed = CostUsageScanner.parseClaudeFile(
+            fileURL: fileURL,
+            range: CostUsageScanner.CostUsageDayRange(since: day, until: day),
+            providerFilter: .all,
+            modelsDevCacheRoot: env.cacheRoot)
+
+        #expect(parsed.rows.count == 1)
+        #expect(parsed.rows[0].model == "claude-opus-5-5")
+        #expect(parsed.rows[0].cacheCreate == 35194)
+        #expect(parsed.rows[0].cacheCreate1h == 35194)
+        // 2 * $4 + 35194 * $8 (1h write = 2x input) + 10840 * $0.20 + 457 * $20 per million tokens.
+        let expected = 0.292868
+        #expect(abs((Double(parsed.rows[0].costNanos) / 1_000_000_000) - expected) < 0.000000001)
+    }
+
+    @Test
     func `claude transcript refusal remains priced without billing provenance`() throws {
         let env = try CostUsageTestEnvironment()
         defer { env.cleanup() }

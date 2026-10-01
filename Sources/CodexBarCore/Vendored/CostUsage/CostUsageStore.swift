@@ -80,6 +80,7 @@ actor CostUsageStore {
         parserHash: CodexParserHash.value)
     static let cacheGeneration = "sqlite:\(CostUsageStore.schemaVersion)"
     static let compatiblePredecessorParserHashes: Set<String> = [
+        "ddce8af87bf787c8", // Claude-only bundled pricing rows leave native Codex rows and checkpoints unchanged.
         "98de5f52231e524e", // 0.68.0 rows and checkpoints survive sparse priority-day reconciliation.
         "9972dad7f7aeff21", // Direct-fork baseline corrections use bounded parser-revision migration.
         "4dd9e5769818370a", // Linux Priority trace support preserves native rows and checkpoints.

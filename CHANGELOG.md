@@ -27,6 +27,7 @@
 - Claude: retain an established CLI source after transient timeouts and loading stalls so Auto refreshes can retry without an unrelated missing-OAuth-credentials warning (#4129).
 - Claude: exclude usage-insights tool names and percentages from quota and account parsing (#4083).
 - Claude: keep configured MCP servers out of the direct `/usage` fallback (#4112). Thanks @sudoHG!
+- Claude: add bundled pricing for Fable 5.1, Mythos 5 and 5.1, Opus 5 and 5.5, and Sonnet 5 and 5.5, including the reduced Fable 5.1, Mythos 5.1, and Opus 5.5 cache-hit rates, so local cost history prices current models when models.dev lacks them; saved Claude reports recalculate once.
 
 - Menu bar: show the remaining quota when only the third usage window is available, including Gemini Flash Lite-only accounts, through the shared metric fallback (#4128). Thanks @devYRPauli!
 - Cursor: keep Linux serve refreshes authenticated when earlier HTTP responses leave stale cookies in the process session (#4137).
