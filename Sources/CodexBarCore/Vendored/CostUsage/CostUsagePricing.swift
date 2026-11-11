@@ -232,6 +232,7 @@ enum CostUsagePricing {
             cacheReadInputCostPerTokenAboveThreshold: nil),
         // cache hits 0.025x input
         "claude-fable-5-1": ClaudePricing(input: 1e-5, output: 5e-5, cacheWrite: 1.25e-5, cacheRead: 2.5e-7),
+        "claude-fable-5-2": ClaudePricing(input: 8e-6, output: 4e-5, cacheWrite: 1e-5, cacheRead: 2e-7),
         "claude-haiku-4-5-20251001": ClaudePricing(
             inputCostPerToken: 1e-6,
             outputCostPerToken: 5e-6,
@@ -252,6 +253,7 @@ enum CostUsagePricing {
             outputCostPerTokenAboveThreshold: nil,
             cacheCreationInputCostPerTokenAboveThreshold: nil,
             cacheReadInputCostPerTokenAboveThreshold: nil),
+        "claude-haiku-5-5": .haiku55,
         // Mythos is served to verified organizations only and is absent from the models.dev
         // anthropic catalog. Rates: https://platform.claude.com/docs/en/about-claude/pricing
         "claude-mythos-5": ClaudePricing(
@@ -274,6 +276,7 @@ enum CostUsagePricing {
             outputCostPerTokenAboveThreshold: nil,
             cacheCreationInputCostPerTokenAboveThreshold: nil,
             cacheReadInputCostPerTokenAboveThreshold: nil),
+        "claude-mythos-5-2": ClaudePricing(input: 8e-6, output: 4e-5, cacheWrite: 1e-5, cacheRead: 2e-7),
         "claude-opus-4-5-20251101": ClaudePricing(
             inputCostPerToken: 5e-6,
             outputCostPerToken: 2.5e-5,
@@ -882,6 +885,18 @@ extension CostUsagePricing.ClaudePricing {
             cacheCreationInputCostPerTokenAboveThreshold: nil,
             cacheReadInputCostPerTokenAboveThreshold: nil)
     }
+
+    /// Haiku 5.5 bills a request at the higher rates when its prompt, counting cache reads and writes, exceeds 100K.
+    static let haiku55 = Self(
+        inputCostPerToken: 1e-7,
+        outputCostPerToken: 5e-7,
+        cacheCreationInputCostPerToken: 1.25e-7,
+        cacheReadInputCostPerToken: 1e-8,
+        thresholdTokens: 100_000,
+        inputCostPerTokenAboveThreshold: 5e-7,
+        outputCostPerTokenAboveThreshold: 2.5e-6,
+        cacheCreationInputCostPerTokenAboveThreshold: 6.25e-7,
+        cacheReadInputCostPerTokenAboveThreshold: 5e-8)
 }
 
 extension CostUsagePricing {

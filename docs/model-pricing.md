@@ -59,10 +59,12 @@ current rates. Terra and Luna retain their separate July 30 cutoff. Custom-prici
 
 Bundled Claude fallback rows price models that models.dev lacks. They follow
 [Anthropic's pricing page](https://platform.claude.com/docs/en/about-claude/pricing) as of **2026-11-11**.
-Claude 4.6 and later models bill the full context window at standard rates. Dated Opus 4.6 and Sonnet 4.6 usage
-always uses the bundled rates, with the earlier long-context premium before **2026-03-13 UTC**. One-hour cache
-writes cost 2x input.
-Cache hits cost 0.025x input on Fable 5.1 and Mythos 5.1 and 0.05x input on Opus 5.5 and Sonnet 5.5. Fast-mode
+Claude 4.6 and later models bill the full context window at standard rates, except Haiku 5.5: a request whose
+prompt (input plus cache reads and writes) exceeds 100K tokens pays Haiku 5.5's higher tier for every token.
+Dated Opus 4.6 and Sonnet 4.6 usage always uses the bundled rates, with the earlier long-context premium before
+**2026-03-13 UTC**. One-hour cache writes cost 2x input.
+Cache hits cost 0.025x input on Fable 5.2, Mythos 5.2, Fable 5.1 and Mythos 5.1 and 0.05x input on Opus 5.5 and
+Sonnet 5.5. Fast-mode
 (`usage.speed` `"fast"`) and US data-residency (`inference_geo` `"us"`) premiums are not applied.
 
 ### Explicit provider identity in OpenCodex

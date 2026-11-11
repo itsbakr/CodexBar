@@ -8,7 +8,7 @@
 - Usage & Spend: add a Models view grouped by currency, preserve partial-history warnings, and match shared cards to the current appearance (#4889, #4888). Thanks @Chipagosfinest!
 - CLI: expose provider-owned setup routes for Copilot, OpenAI API, and Azure OpenAI, with explicit unknown guidance for other providers (#4705, #4916). Thanks @Yuxin-Qiao!
 - Devin: fall back to the desktop app session after browser sources, using only an existing silent Keychain grant and never prompting (#4905). Thanks @kentoku24!
-- Claude cost history: price Fable 5.1, Opus 5 and 5.5, and Sonnet 5 and 5.5 from published Anthropic rates, including the reduced cache-hit rates for Fable 5.1 (0.025x input) and Opus 5.5 and Sonnet 5.5 (0.05x input), so local cost history prices current models when models.dev lacks them; saved Claude reports recalculate once.
+- Claude cost history: price Fable 5.2 and 5.1, Mythos 5.2, Opus 5 and 5.5, Sonnet 5 and 5.5, and Haiku 5.5 from published Anthropic rates, including the reduced cache-hit rates for Fable 5.2, Mythos 5.2 and Fable 5.1 (0.025x input) and Opus 5.5 and Sonnet 5.5 (0.05x input) and Haiku 5.5's higher tier for prompts over 100K tokens, so local cost history prices current models when models.dev lacks them; saved Claude reports recalculate once.
 
 ### Fixed
 
