@@ -1,0 +1,888 @@
+import Foundation
+import Testing
+@testable import CodexBarCore
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+
+/// Plugin-engine coverage for the bundled WorkBuddy billing script.
+struct WorkBuddyPluginTests {
+    static let summaryPath = "/billing/meter/get-user-resource-summary"
+    static let paidPath = "/billing/meter/get-user-resource-paid-packages"
+    static let freePath = "/billing/meter/get-user-resource-free-packages"
+
+    static let summary = #"""
+    {
+      "code": 0,
+      "msg": "OK",
+      "requestId": "fixture-request",
+      "data": {
+        "Packages": [{
+          "PackageCode": "FIXTURE_FREE",
+          "CycleTotalCapacity": "500",
+          "CycleRemainCapacity": "450",
+          "CycleUsedCapacity": "50",
+          "CycleFrozenCapacity": "0",
+          "CapacityUnit": "credits",
+          "TotalCount": 1
+        }],
+        "SubscriptionPackageCode": "",
+        "SubscriptionPackageName": "体验版",
+        "IsPaidUser": false,
+        "IsProtectedPriceUser": false
+      }
+    }
+    """#
+
+    static let emptyPackages = #"{"code":0,"msg":"OK","data":{"Accounts":[],"TotalCount":0}}"#
+
+    static let freePackages = #"""
+    {"code":0,"msg":"OK","data":{"TotalCount":1,"Accounts":[{
+      "CapacityUnit": "credits",
+      "CycleStartTime": "2026-10-01 00:00:00",
+      "CycleEndTime": "2026-10-31 23:59:59",
+      "Status": 0
+    }]}}
+    """#
+
+    /// 2026-10-03T00:00:00Z
+    static let now = Date(timeIntervalSince1970: 1_790_985_600)
+    /// 2026-10-31 23:59:59 China Standard Time, plus one second.
+    static let octoberReset = Date(timeIntervalSince1970: 1_793_462_400)
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `monthly credits become one meter with plan and cycle reset`(engine: ProviderPluginEngineKind) async throws {
+        let snapshot = try await Self.fetch(engine: engine)
+        #expect(snapshot.primary?.usedPercent == 10)
+        #expect(snapshot.primary?.windowMinutes == nil)
+        #expect(snapshot.primary?.resetsAt == Self.octoberReset)
+        #expect(snapshot.primary?.resetDescription == "450 / 500 credits left")
+        #expect(snapshot.identity?.providerID == .workbuddy)
+        #expect(snapshot.identity?.loginMethod == "体验版")
+        #expect(snapshot.details.isEmpty)
+        #expect(snapshot.providerCost == nil)
+        #expect(snapshot.dataConfidence == .exact)
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `requests post JSON with the website session and no bearer`(engine: ProviderPluginEngineKind) async throws {
+        let paths = PathTrace()
+        let runtime = try BundledPluginTestSupport.runtime(
+            "workbuddy",
+            engine: engine,
+            transport: ProviderHTTPTransportHandler { request in
+                let path = request.url?.path ?? ""
+                paths.append(path)
+                #expect(request.url?.host == "www.workbuddy.cn")
+                #expect(request.httpMethod == "POST")
+                #expect(request.value(forHTTPHeaderField: "Authorization") == nil)
+                let cookie = request.value(forHTTPHeaderField: "Cookie") ?? ""
+                #expect(cookie.contains("session=fixture-session"))
+                #expect(cookie.contains("locale=zh"))
+                #expect(request.value(forHTTPHeaderField: "Accept") == "application/json")
+                #expect(request.value(forHTTPHeaderField: "Origin") == "https://www.workbuddy.cn")
+                #expect(request.value(forHTTPHeaderField: "Referer") == "https://www.workbuddy.cn/profile/plans-usage")
+                if path == Self.summaryPath {
+                    #expect(request.timeoutInterval == 22)
+                } else {
+                    #expect((1...5).contains(request.timeoutInterval))
+                }
+                #expect(request.value(forHTTPHeaderField: "User-Agent") == Self.chromeUserAgent(154))
+                let body = try JSONSerialization.jsonObject(with: #require(request.httpBody)) as? [String: Any]
+                if path == Self.summaryPath {
+                    #expect(body?.isEmpty == true)
+                } else {
+                    let codes = body?["PackageCodes"] as? [String] ?? []
+                    #expect(body?["PageNumber"] as? Int == 1)
+                    #expect(body?["PageSize"] as? Int == 100)
+                    #expect(body?["Status"] as? [Int] == [0, 3])
+                    #expect(codes.contains(path == Self.freePath
+                            ? "TCACA_code_008_cfWoLwvjU4"
+                            : "TCACA_code_002_AkiJS3ZHF5"))
+                    #expect(codes.count == (path == Self.freePath ? 11 : 9))
+                }
+                return try Self.response(request, body: Self.route(path).1)
+            })
+        let sessions = SessionTrace(headers: [Self.fixtureCookie])
+        _ = try await runtime.fetchUsage(
+            settings: ["webTimeoutSeconds": "22", "chromeMajorVersion": "154"],
+            now: Self.now,
+            cookieSessionResolver: { _, _ in sessions.next() },
+            cookieSessionValidator: { _, _ in })
+        #expect(paths.values == [Self.summaryPath, Self.paidPath, Self.freePath])
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `credit packages are summed and other units ignored`(engine: ProviderPluginEngineKind) async throws {
+        let summary = #"""
+        {"code":0,"msg":"OK","data":{"SubscriptionPackageName":"专业版","IsPaidUser":true,"Packages":[
+          {"CycleTotalCapacity":"2000","CycleRemainCapacity":"1500.5","CycleFrozenCapacity":"12.25","CapacityUnit":"credits"},
+          {"CycleTotalCapacity":"500","CycleRemainCapacity":"500","CycleFrozenCapacity":"0","CapacityUnit":"credits"},
+          {"CycleTotalCapacity":"9","CycleRemainCapacity":"1","CapacityUnit":"requests"},
+          {"CycleTotalCapacity":"99","CycleRemainCapacity":"1"}
+        ]}}
+        """#
+        let snapshot = try await Self.fetch(engine: engine, routes: [Self.summaryPath: (200, summary)])
+        #expect(abs((snapshot.primary?.usedPercent ?? 0) - 19.98) < 0.001)
+        #expect(snapshot.primary?.resetDescription == "2,000.5 / 2,500 credits left")
+        #expect(snapshot.identity?.loginMethod == "专业版")
+        #expect(snapshot.details.first?.rows.map(\.label) == ["Reserved"])
+        #expect(snapshot.details.first?.rows.map(\.value) == ["12.25"])
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `earliest future cycle end across packages is the reset`(engine: ProviderPluginEngineKind) async throws {
+        let paid = #"""
+        {"code":0,"msg":"OK","data":{"Accounts":[
+          {"CapacityUnit":"credits","CycleEndTime":"2026-09-30 23:59:59"},
+          {"CapacityUnit":"credits","CycleEndTime":"2026-10-20 23:59:59"},
+          {"CapacityUnit":"requests","CycleEndTime":"2026-10-05 23:59:59"},
+          {"CapacityUnit":"credits","CycleEndTime":"2026-10-04"}
+        ]}}
+        """#
+        let snapshot = try await Self.fetch(engine: engine, routes: [Self.paidPath: (200, paid)])
+        // 2026-10-20 23:59:59 +08:00, plus one second.
+        #expect(snapshot.primary?.resetsAt == Date(timeIntervalSince1970: 1_792_512_000))
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `the paid cycle outranks an earlier free grant`(engine: ProviderPluginEngineKind) async throws {
+        // Reward credits keep the free listing in play, so both listings answer this refresh.
+        let summary = #"""
+        {"code":0,"msg":"OK","data":{"SubscriptionPackageName":"标准版","Packages":[
+          {"CycleTotalCapacity":"2000","CycleRemainCapacity":"1500","CapacityUnit":"credits"}
+        ],"CreditGroups":[
+          {"Kind":"benefit","Name":"平台奖励积分","CycleTotalCapacity":"2139","CycleRemainCapacity":"621","CapacityUnit":"credits","TotalCount":1}
+        ]}}
+        """#
+        let paid = #"""
+        {"code":0,"msg":"OK","data":{"Accounts":[
+          {"CapacityUnit":"credits","CycleEndTime":"2026-11-24 12:44:13"}
+        ]}}
+        """#
+        // The trial grant closes with the calendar month and the reward grants end piecewise.
+        let free = #"""
+        {"code":0,"msg":"OK","data":{"Accounts":[
+          {"CapacityUnit":"credits","CycleEndTime":"2026-10-31 23:59:59"},
+          {"CapacityUnit":"credits","CycleEndTime":"2026-11-11 23:09:21","CycleCapacityRemain":"21"}
+        ]}}
+        """#
+        let snapshot = try await Self.fetch(
+            engine: engine,
+            routes: [Self.summaryPath: (200, summary), Self.paidPath: (200, paid), Self.freePath: (200, free)])
+        // 2026-11-24 12:44:13 +08:00, plus one second.
+        #expect(snapshot.primary?.resetsAt == Date(timeIntervalSince1970: 1_795_495_454))
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `an exhausted paid cycle falls back to the free grants`(engine: ProviderPluginEngineKind) async throws {
+        let paid = #"""
+        {"code":0,"msg":"OK","data":{"Accounts":[
+          {"CapacityUnit":"credits","CycleEndTime":"2026-09-30 23:59:59"}
+        ]}}
+        """#
+        let snapshot = try await Self.fetch(engine: engine, routes: [Self.paidPath: (200, paid)])
+        #expect(snapshot.primary?.resetsAt == Self.octoberReset)
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `platform reward credits become their own window`(engine: ProviderPluginEngineKind) async throws {
+        let summary = #"""
+        {"code":0,"msg":"OK","data":{"SubscriptionPackageName":"标准版","Packages":[
+          {"CycleTotalCapacity":"2000","CycleRemainCapacity":"1479.09","CapacityUnit":"credits"},
+          {"CycleTotalCapacity":"2000","CycleRemainCapacity":"2000","CapacityUnit":"credits"},
+          {"CycleTotalCapacity":"2139","CycleRemainCapacity":"621","CapacityUnit":"credits"}
+        ],"CreditGroups":[
+          {"Kind":"plan_base","Name":"套餐基础积分","CycleTotalCapacity":"2000","CycleRemainCapacity":"1479.09","CapacityUnit":"credits","TotalCount":1},
+          {"Kind":"plan_bonus","Name":"套餐赠送积分","CycleTotalCapacity":"2000","CycleRemainCapacity":"2000","CapacityUnit":"credits","TotalCount":1},
+          {"Kind":"addon","Name":"购买积分","CycleTotalCapacity":"0","CycleRemainCapacity":"0","CapacityUnit":"credits","TotalCount":0},
+          {"Kind":"benefit","Name":"平台奖励积分","CycleTotalCapacity":"2139","CycleRemainCapacity":"621","CapacityUnit":"credits","TotalCount":24}
+        ]}}
+        """#
+        let snapshot = try await Self.fetch(engine: engine, routes: [Self.summaryPath: (200, summary)])
+        let windows = try #require(snapshot.extraRateWindows)
+        let rewards = try #require(windows.first)
+        #expect(windows.count == 1)
+        #expect(rewards.id == "rewards")
+        #expect(rewards.title == "Rewards")
+        #expect(abs(rewards.window.usedPercent - (2139.0 - 621.0) / 2139.0 * 100) < 0.001)
+        #expect(rewards.window.resetDescription == "621 / 2,139 credits left")
+        #expect(rewards.window.resetsAt == nil)
+        #expect(snapshot.primary?.resetDescription == "4,100.09 / 6,139 credits left")
+        // Rewards ride inside the primary allowance; the meter itself is untouched.
+        #expect(abs((snapshot.primary?.usedPercent ?? 0) - (6139.0 - 4100.09) / 6139.0 * 100) < 0.001)
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `reward grants bound the window while the paid cycle keeps the reset`(
+        engine: ProviderPluginEngineKind) async throws
+    {
+        let summary = #"""
+        {"code":0,"msg":"OK","data":{"SubscriptionPackageName":"标准版","Packages":[
+          {"CycleTotalCapacity":"2000","CycleRemainCapacity":"1500","CapacityUnit":"credits"},
+          {"CycleTotalCapacity":"2139","CycleRemainCapacity":"621","CapacityUnit":"credits"}
+        ],"CreditGroups":[
+          {"Kind":"benefit","Name":"平台奖励积分","CycleTotalCapacity":"2139","CycleRemainCapacity":"621","CapacityUnit":"credits","TotalCount":2}
+        ]}}
+        """#
+        let paid = #"""
+        {"code":0,"msg":"OK","data":{"Accounts":[
+          {"PackageCode":"TCACA_code_002_AkiJS3ZHF5","CapacityUnit":"credits","CycleEndTime":"2026-11-24 12:44:13"}
+        ]}}
+        """#
+        // The trial grant lapses before any reward grant, so it must not bound the reward window.
+        let free = #"""
+        {"code":0,"msg":"OK","data":{"Accounts":[
+          {"PackageCode":"TCACA_code_008_cfWoLwvjU4","CapacityUnit":"credits","CycleEndTime":"2026-10-31 23:59:59"},
+          {"PackageCode":"TCACA_code_007_nzdH5h4Nl0","CapacityUnit":"credits","CycleEndTime":"2026-11-18 17:11:10","CycleCapacityRemain":"600"},
+          {"PackageCode":"TCACA_code_007_nzdH5h4Nl0","CapacityUnit":"credits","CycleEndTime":"2026-11-11 23:09:21","CycleCapacityRemain":"21"}
+        ]}}
+        """#
+        let snapshot = try await Self.fetch(
+            engine: engine,
+            routes: [Self.summaryPath: (200, summary), Self.paidPath: (200, paid), Self.freePath: (200, free)])
+        #expect(snapshot.primary?.resetsAt == Date(timeIntervalSince1970: 1_795_495_454))
+        let rows = try #require(snapshot.details.first?.rows)
+        // The window carries the balance, so the row only carries what a window cannot: the expiry date.
+        #expect(rows.contains { $0.label == "Reward expiry" && $0.value == "Nov 11" })
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `only reward grants with known remaining credits bound the expiry`(
+        engine: ProviderPluginEngineKind) async throws
+    {
+        let summary = #"""
+        {"code":0,"msg":"OK","data":{"SubscriptionPackageName":"标准版","Packages":[
+          {"CycleTotalCapacity":"2000","CycleRemainCapacity":"1500","CapacityUnit":"credits"}
+        ],"CreditGroups":[
+          {"Kind":"benefit","Name":"平台奖励积分","CycleTotalCapacity":"2139","CycleRemainCapacity":"621","CapacityUnit":"credits","TotalCount":2}
+        ]}}
+        """#
+        let paid = #"""
+        {"code":0,"msg":"OK","data":{"Accounts":[
+          {"PackageCode":"TCACA_code_002_AkiJS3ZHF5","CapacityUnit":"credits","CycleEndTime":"2026-11-24 12:44:13"}
+        ]}}
+        """#
+        // Spent grants stay in the listing until their cycle ends. The dashboard reports the lapse of the
+        // grant that still carries credits, so the earlier emptied one must not pull the window forward.
+        let free = #"""
+        {"code":0,"msg":"OK","data":{"Accounts":[
+          {"PackageCode":"TCACA_code_007_nzdH5h4Nl0","CapacityUnit":"credits","CycleEndTime":"2026-11-10 23:09:21"},
+          {"PackageCode":"TCACA_code_007_nzdH5h4Nl0","CapacityUnit":"credits","CycleEndTime":"2026-11-11 23:09:21","CycleCapacityRemain":"0"},
+          {"PackageCode":"TCACA_code_007_nzdH5h4Nl0","CapacityUnit":"credits","CycleEndTime":"2026-11-24 21:16:43","CycleCapacityRemain":"6"}
+        ]}}
+        """#
+        let snapshot = try await Self.fetch(
+            engine: engine,
+            routes: [Self.summaryPath: (200, summary), Self.paidPath: (200, paid), Self.freePath: (200, free)])
+        let rows = try #require(snapshot.details.first?.rows)
+        #expect(rows.filter { $0.label == "Reward expiry" }.map(\.value) == ["Nov 24"])
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `reward expiries never stand in for allowance resets`(engine: ProviderPluginEngineKind) async throws {
+        let summary = #"""
+        {"code":0,"data":{"Packages":[
+          {"CycleTotalCapacity":"2139","CycleRemainCapacity":"621","CapacityUnit":"credits"}
+        ],"CreditGroups":[
+          {"Kind":"benefit","CycleTotalCapacity":"2139","CycleRemainCapacity":"621","CapacityUnit":"credits"}
+        ]}}
+        """#
+        let free = #"""
+        {"code":0,"data":{"Accounts":[
+          {"PackageCode":"TCACA_code_007_nzdH5h4Nl0","CapacityUnit":"credits","CycleEndTime":"2026-11-11 23:09:21","CycleCapacityRemain":"621"}
+        ]}}
+        """#
+        let snapshot = try await Self.fetch(
+            engine: engine,
+            routes: [
+                Self.summaryPath: (200, summary),
+                Self.paidPath: (200, Self.emptyPackages),
+                Self.freePath: (200, free),
+            ])
+        let primary = try #require(snapshot.primary)
+        #expect(primary.resetDescription == "621 / 2,139 credits left")
+        #expect(primary.resetsAt == nil)
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `an empty reward group adds no window and no expiry row`(engine: ProviderPluginEngineKind) async throws {
+        let summary = #"""
+        {"code":0,"msg":"OK","data":{"SubscriptionPackageName":"体验版","Packages":[
+          {"CycleTotalCapacity":"500","CycleRemainCapacity":"450","CapacityUnit":"credits"}
+        ],"CreditGroups":[
+          {"Kind":"benefit","Name":"平台奖励积分","CycleTotalCapacity":"0","CycleRemainCapacity":"0","CapacityUnit":"credits","TotalCount":0}
+        ]}}
+        """#
+        let snapshot = try await Self.fetch(engine: engine, routes: [Self.summaryPath: (200, summary)])
+        #expect(snapshot.extraRateWindows == nil)
+        #expect(snapshot.details.isEmpty)
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `the free listing is skipped when the paid cycle answers and no rewards exist`(
+        engine: ProviderPluginEngineKind) async throws
+    {
+        let paid = #"""
+        {"code":0,"msg":"OK","data":{"Accounts":[
+          {"CapacityUnit":"credits","CycleEndTime":"2026-11-24 12:44:13"}
+        ]}}
+        """#
+        let paths = PathTrace()
+        let runtime = try BundledPluginTestSupport.runtime(
+            "workbuddy",
+            engine: engine,
+            transport: ProviderHTTPTransportHandler { request in
+                let path = request.url?.path ?? ""
+                paths.append(path)
+                return try Self.response(request, body: path == Self.paidPath ? paid : Self.route(path).1)
+            })
+        let sessions = SessionTrace(headers: [Self.fixtureCookie])
+        let snapshot = try await runtime.fetchUsage(
+            now: Self.now,
+            cookieSessionResolver: { _, _ in sessions.next() },
+            cookieSessionValidator: { _, _ in })
+        #expect(snapshot.primary?.resetsAt == Date(timeIntervalSince1970: 1_795_495_454))
+        #expect(paths.values == [Self.summaryPath, Self.paidPath])
+    }
+
+    @Test(
+        arguments: [
+            (401, "{}"), (500, "{}"), (200, #"{"code":4001,"msg":"denied"}"#),
+            (200, "not JSON"), (200, #"{"code":0}"#),
+        ],
+        BundledPluginTestSupport.engines)
+    func `failed package listings keep the balance without a reset`(
+        failure: (Int, String),
+        engine: ProviderPluginEngineKind) async throws
+    {
+        let snapshot = try await Self.fetch(
+            engine: engine,
+            routes: [Self.paidPath: failure, Self.freePath: failure])
+        #expect(snapshot.primary?.usedPercent == 10)
+        #expect(snapshot.primary?.resetsAt == nil)
+        #expect(snapshot.primary?.resetDescription == "450 / 500 credits left")
+    }
+
+    @Test(.timeLimit(.minutes(1)), arguments: BundledPluginTestSupport.engines)
+    func `stalled listing exhausts its shared budget and preserves the balance`(
+        engine: ProviderPluginEngineKind) async throws
+    {
+        let context = ProviderFetchContext(
+            runtime: .cli, sourceMode: .web, includeCredits: false,
+            webTimeout: 60, webDebugDumpHTML: false, verbose: false, env: [:],
+            settings: .make(workbuddy: .init(cookies: .init(
+                cookieSource: .manual,
+                manualCookieHeader: Self.fixtureCookie))),
+            fetcher: UsageFetcher(environment: [:]),
+            claudeFetcher: WorkBuddyUnusedClaudeFetcher(),
+            browserDetection: BrowserDetection(
+                homeDirectory: "/nonexistent/workbuddy-fixture",
+                fileExists: { _ in false }, directoryContents: { _ in nil }))
+        let web = try #require(WorkBuddyProviderDescriptor.spec.webSource)
+        #expect(web.timeout.resolve(context) == 60)
+        let values = try #require(web.resolveValues(context))
+        let bundle = try #require(CodexBarCoreResources.bundle)
+        let source = try String(
+            contentsOf: #require(bundle.url(forResource: "workbuddy", withExtension: "js")),
+            encoding: .utf8)
+        let paths = PathTrace()
+        let (starts, started) = AsyncStream<Void>.makeStream()
+        let (cancellations, cancelled) = AsyncStream<Bool>.makeStream()
+        defer { started.finish(); cancelled.finish() }
+        // Advance the fixture clock at the next listing budget check after the request times out.
+        let clock = """
+        Date.now = (() => {
+          let reads = 0;
+          return () => ++reads <= 2 ? 0 : 5000;
+        })();
+        """
+        let runtime = try ProviderPluginRuntime(
+            source: clock + "\n" + source, resourceBundle: bundle,
+            transport: ProviderHTTPTransportHandler { request in
+                paths.append(request.url?.path ?? "")
+                if request.url?.path == Self.summaryPath {
+                    #expect(request.timeoutInterval == 30)
+                    return try Self.response(request, body: Self.summary)
+                }
+                #expect(request.url?.path == Self.paidPath)
+                #expect(request.timeoutInterval == 5)
+                started.yield()
+                defer { cancelled.yield(Task.isCancelled) }
+                try await BundledPluginTestSupport.suspendUntilCancelled()
+                throw URLError(.timedOut)
+            },
+            timeout: BundledPluginTestSupport.timeout,
+            contextOptions: ProviderPluginContextOptions(
+                optionalRequestTimeoutSeconds: nil,
+                waitForHTTPDeadline: { _, budget in
+                    if budget == .seconds(30) {
+                        try await BundledPluginTestSupport.suspendUntilCancelled()
+                        return
+                    }
+                    #expect(budget == .seconds(5))
+                    var iterator = starts.makeAsyncIterator()
+                    #expect(await iterator.next() != nil)
+                    try Task.checkCancellation()
+                }),
+            engine: engine)
+        let sessions = SessionTrace(headers: [Self.fixtureCookie])
+        let snapshot = try await runtime.fetchUsage(
+            settings: values.settings, cookieSource: .manual,
+            cookieSessionResolver: { _, _ in sessions.next() })
+        var iterator = cancellations.makeAsyncIterator()
+        #expect(await iterator.next() == true)
+        #expect(paths.values == [Self.summaryPath, Self.paidPath])
+        #expect(snapshot.primary?.usedPercent == 10)
+        #expect(snapshot.primary?.resetsAt == nil)
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `a failed paid listing preserves the free listing reset`(engine: ProviderPluginEngineKind) async throws {
+        let snapshot = try await Self.fetch(engine: engine, routes: [Self.paidPath: (401, "{}")])
+        #expect(snapshot.primary?.usedPercent == 10)
+        #expect(snapshot.primary?.resetsAt == Self.octoberReset)
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `cancelling an optional listing still cancels the refresh`(engine: ProviderPluginEngineKind) async throws {
+        let runtime = try BundledPluginTestSupport.runtime(
+            "workbuddy", engine: engine, wallClock: Self.now,
+            transport: ProviderHTTPTransportHandler { request in
+                if request.url?.path != Self.summaryPath { throw URLError(.cancelled) }
+                return try Self.response(request, body: Self.summary)
+            })
+        let sessions = SessionTrace(headers: [Self.fixtureCookie])
+        await #expect(throws: CancellationError.self) {
+            _ = try await runtime.fetchUsage(
+                now: Self.now,
+                cookieSessionResolver: { _, _ in sessions.next() },
+                cookieSessionValidator: { _, _ in })
+        }
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `zero allowance shows left and total rows instead of a meter`(engine: ProviderPluginEngineKind) async throws {
+        let summary = #"""
+        {"code":0,"msg":"OK","data":{"SubscriptionPackageName":"体验版","Packages":[
+          {"CycleTotalCapacity":"0","CycleRemainCapacity":"0","CycleFrozenCapacity":"2.5","CapacityUnit":"credits"}
+        ]}}
+        """#
+        let snapshot = try await Self.fetch(engine: engine, routes: [Self.summaryPath: (200, summary)])
+        #expect(snapshot.primary == nil)
+        #expect(snapshot.details.first?.rows.map(\.label) == ["Left", "Total", "Reserved"])
+        #expect(snapshot.details.first?.rows.map(\.value) == ["0", "0", "2.5"])
+        #expect(snapshot.identity?.loginMethod == "体验版")
+    }
+
+    @Test(
+        arguments: ["true", "-5", "\"\"", "\"NaN\"", "\"1e3\"", "\"-1\"", "[]", "null"],
+        BundledPluginTestSupport.engines)
+    func `invalid amounts fail instead of publishing a balance`(
+        value: String,
+        engine: ProviderPluginEngineKind) async
+    {
+        let summary = """
+        {"code":0,"data":{"Packages":[{"CycleTotalCapacity":"500","CycleRemainCapacity":\(value),\
+        "CapacityUnit":"credits"}]}}
+        """
+        await Self.expectFailure(.parseFailure) {
+            _ = try await Self.fetch(engine: engine, routes: [Self.summaryPath: (200, summary)])
+        }
+    }
+
+    @Test(
+        arguments: ["not JSON", "[]", #"{"code":0}"#, #"{"code":0,"data":{}}"#, #"{"code":0,"data":{"Packages":{}}}"#],
+        BundledPluginTestSupport.engines)
+    func `malformed summaries stay unavailable`(body: String, engine: ProviderPluginEngineKind) async {
+        await Self.expectFailure(.parseFailure) {
+            _ = try await Self.fetch(engine: engine, routes: [Self.summaryPath: (200, body)])
+        }
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `non zero summary codes are API failures`(engine: ProviderPluginEngineKind) async {
+        await Self.expectFailure(.apiFailure) {
+            _ = try await Self.fetch(
+                engine: engine,
+                routes: [Self.summaryPath: (200, #"{"code":10001,"msg":"fixture"}"#)])
+        }
+    }
+
+    @Test(arguments: [
+        (401, ProviderFetchClassifiedError.Kind.authenticationExpired),
+        (403, .permissionDenied),
+        (429, .rateLimited),
+        (503, .providerUnavailable),
+        (404, .apiFailure),
+    ], BundledPluginTestSupport.engines)
+    func `summary failures retain actionable classification`(
+        failure: (Int, ProviderFetchClassifiedError.Kind),
+        engine: ProviderPluginEngineKind) async
+    {
+        await Self.expectFailure(failure.1) {
+            _ = try await Self.fetch(engine: engine, routes: [Self.summaryPath: (failure.0, "<html></html>")])
+        }
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `empty browser import is a missing credential`(engine: ProviderPluginEngineKind) async throws {
+        let runtime = try BundledPluginTestSupport.runtime(
+            "workbuddy",
+            engine: engine,
+            transport: ProviderHTTPTransportHandler { _ in
+                Issue.record("Must not fetch without a session cookie")
+                throw ProviderPluginError.secretAccess("unreachable")
+            })
+        await Self.expectFailure(.missingCredential) {
+            _ = try await runtime.fetchUsage(
+                now: Self.now,
+                cookieSessionResolver: { _, _ in nil },
+                cookieSessionValidator: { _, _ in })
+        }
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `rejected candidates advance within the same refresh`(engine: ProviderPluginEngineKind) async throws {
+        let sessions = SessionTrace(headers: ["session=rejected-fixture", Self.fixtureCookie])
+        let runtime = try BundledPluginTestSupport.runtime(
+            "workbuddy", engine: engine, wallClock: Self.now,
+            transport: ProviderHTTPTransportHandler { request in
+                let header = request.value(forHTTPHeaderField: "Cookie") ?? ""
+                let path = request.url?.path ?? ""
+                if path == Self
+                    .summaryPath { sessions.request(header.contains("rejected-fixture") ? "rejected" : "valid") }
+                let rejected = header.contains("rejected-fixture")
+                return try Self.response(request, body: Self.route(path).1, status: rejected ? 401 : 200)
+            })
+        let usage = try await runtime.fetchUsage(
+            now: Self.now,
+            cookieSessionResolver: { domain, _ in
+                #expect(domain == "www.workbuddy.cn")
+                return sessions.next()
+            },
+            cookieSessionInvalidator: { domain, id in
+                #expect(domain == "www.workbuddy.cn")
+                sessions.reject(id)
+            },
+            cookieSessionValidator: { _, _ in })
+        #expect(usage.primary?.usedPercent == 10)
+        #expect(sessions.requested == ["rejected", "valid"])
+        #expect(sessions.rejected == [sessions.candidates[0].id])
+    }
+
+    @Test(arguments: [ProviderCookieSource.manual, .off], BundledPluginTestSupport.engines)
+    func `manual and off never advance to another account`(
+        source: ProviderCookieSource, engine: ProviderPluginEngineKind) async throws
+    {
+        let sessions = SessionTrace(headers: ["session=rejected-fixture", Self.fixtureCookie])
+        let runtime = try BundledPluginTestSupport.runtime(
+            "workbuddy", engine: engine, wallClock: Self.now,
+            transport: ProviderHTTPTransportHandler { request in
+                sessions.request(request.value(forHTTPHeaderField: "Cookie") ?? "")
+                return try Self.response(request, body: "{}", status: 401)
+            })
+        await Self.expectFailure(source == .off ? .missingCredential : .authenticationExpired) {
+            _ = try await runtime.fetchUsage(
+                now: Self.now,
+                cookieSource: source,
+                cookieSessionResolver: { _, _ in sessions.next() },
+                cookieSessionInvalidator: { _, id in sessions.reject(id) },
+                cookieSessionValidator: { _, _ in })
+        }
+        #expect(sessions.consumed == (source == .off ? 0 : 1))
+        #expect(sessions.requested.count == (source == .off ? 0 : 1))
+    }
+
+    @Test(arguments: [403, 429, 503], BundledPluginTestSupport.engines)
+    func `non authentication errors preserve the candidate and stop retries`(
+        status: Int, engine: ProviderPluginEngineKind) async throws
+    {
+        let sessions = SessionTrace(headers: [Self.fixtureCookie, "session=other"])
+        let runtime = try BundledPluginTestSupport.runtime(
+            "workbuddy", engine: engine, wallClock: Self.now,
+            transport: ProviderHTTPTransportHandler { request in
+                sessions.request(request.value(forHTTPHeaderField: "Cookie") ?? "")
+                return try Self.response(request, body: "{}", status: status)
+            })
+        let expected: ProviderFetchClassifiedError.Kind = switch status {
+        case 403: .permissionDenied
+        case 429: .rateLimited
+        default: .providerUnavailable
+        }
+        await Self.expectFailure(expected) {
+            _ = try await runtime.fetchUsage(
+                now: Self.now,
+                cookieSessionResolver: { _, _ in sessions.next() },
+                cookieSessionInvalidator: { _, id in sessions.reject(id) },
+                cookieSessionValidator: { _, _ in })
+        }
+        #expect(sessions.consumed == 1)
+        #expect(sessions.requested.count == 1)
+        #expect(sessions.rejected.isEmpty)
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `a pending Chrome update retries the previous major user agent`(
+        engine: ProviderPluginEngineKind) async throws
+    {
+        let agents = PathTrace()
+        let runtime = try BundledPluginTestSupport.runtime(
+            "workbuddy", engine: engine, wallClock: Self.now,
+            transport: ProviderHTTPTransportHandler { request in
+                let path = request.url?.path ?? ""
+                let agent = request.value(forHTTPHeaderField: "User-Agent") ?? "none"
+                if path == Self.summaryPath { agents.append(agent) }
+                let accepted = agent == Self.chromeUserAgent(153)
+                return try Self.response(request, body: Self.route(path).1, status: accepted ? 200 : 401)
+            })
+        let sessions = SessionTrace(headers: [Self.fixtureCookie])
+        let usage = try await runtime.fetchUsage(
+            settings: ["chromeMajorVersion": "154", "manualUserAgent": "Unused UA fixture"],
+            now: Self.now,
+            cookieSessionResolver: { _, _ in sessions.next() },
+            cookieSessionValidator: { _, _ in })
+        #expect(agents.values == [Self.chromeUserAgent(154), Self.chromeUserAgent(153)])
+        #expect(usage.primary?.resetsAt == Self.octoberReset)
+        #expect(sessions.rejected.isEmpty)
+    }
+
+    @Test(arguments: ["Mozilla/5.0 Edge fixture", "   "], BundledPluginTestSupport.engines)
+    func `manual usage sends the selected user agent to every billing endpoint`(
+        configured: String,
+        engine: ProviderPluginEngineKind) async throws
+    {
+        let expected = configured.trimmingCharacters(in: .whitespaces).isEmpty ? Self.chromeUserAgent(154) : configured
+        let settings = configured == expected
+            ? ["manualUserAgent": configured]
+            : ["manualUserAgent": configured, "chromeMajorVersion": "154"]
+        let paths = PathTrace()
+        let runtime = try BundledPluginTestSupport.runtime(
+            "workbuddy", engine: engine, wallClock: Self.now,
+            transport: ProviderHTTPTransportHandler { request in
+                let path = request.url?.path ?? ""
+                #expect(request.value(forHTTPHeaderField: "User-Agent") == expected)
+                paths.append(path)
+                if path == Self.paidPath {
+                    return try Self.response(request, body: #"{"code":0,"data":{"Accounts":[]}}"#)
+                }
+                return try Self.response(request, body: Self.route(path).1)
+            })
+        let sessions = SessionTrace(headers: [Self.fixtureCookie])
+        let usage = try await runtime.fetchUsage(
+            settings: settings, now: Self.now, cookieSource: .manual,
+            cookieSessionResolver: { _, _ in sessions.next() })
+        #expect(usage.primary?.resetsAt == Self.octoberReset)
+        #expect(Set(paths.values) == [Self.summaryPath, Self.paidPath, Self.freePath])
+    }
+
+    @Test(
+        arguments: ["fixture\nInjected: yes", "fixture\r\nInjected: yes", "fixture\u{7F}", "fixture\tUA"],
+        BundledPluginTestSupport.engines)
+    func `manual user agent with invalid header characters fails before accessing cookies`(
+        configured: String, engine: ProviderPluginEngineKind) async throws
+    {
+        let sessions = SessionTrace(headers: [Self.fixtureCookie])
+        let runtime = try BundledPluginTestSupport.runtime(
+            "workbuddy", engine: engine, wallClock: Self.now,
+            transport: ProviderHTTPTransportHandler { _ in throw URLError(.badURL) })
+        await Self.expectFailure(.missingCredential) {
+            _ = try await runtime.fetchUsage(
+                settings: ["manualUserAgent": configured],
+                now: Self.now, cookieSource: .manual,
+                cookieSessionResolver: { _, _ in sessions.next() })
+        }
+        #expect(sessions.consumed == 0)
+    }
+
+    @Test(arguments: ["154", nil], BundledPluginTestSupport.engines)
+    func `a session rejected for every user agent is expired`(
+        version: String?, engine: ProviderPluginEngineKind) async throws
+    {
+        let agents = PathTrace()
+        let runtime = try BundledPluginTestSupport.runtime(
+            "workbuddy", engine: engine, wallClock: Self.now,
+            transport: ProviderHTTPTransportHandler { request in
+                agents.append(request.value(forHTTPHeaderField: "User-Agent") ?? "none")
+                return try Self.response(request, body: "{}", status: 401)
+            })
+        let sessions = SessionTrace(headers: [Self.fixtureCookie])
+        await Self.expectFailure(.authenticationExpired) {
+            _ = try await runtime.fetchUsage(
+                settings: version.map { ["chromeMajorVersion": $0] } ?? [:],
+                now: Self.now,
+                cookieSessionResolver: { _, _ in sessions.next() },
+                cookieSessionInvalidator: { _, id in sessions.reject(id) },
+                cookieSessionValidator: { _, _ in })
+        }
+        #expect(agents.values == (version == nil
+                ? ["none"]
+                : [Self.chromeUserAgent(154), Self.chromeUserAgent(153)]))
+        #expect(sessions.rejected == [sessions.candidates[0].id])
+    }
+
+    @Test(arguments: [ProviderCookieSource.auto, .manual], BundledPluginTestSupport.engines)
+    func `only an accepted automatic session is cached`(
+        source: ProviderCookieSource, engine: ProviderPluginEngineKind) async throws
+    {
+        let sessions = SessionTrace(headers: [Self.fixtureCookie])
+        let accepted = PathTrace()
+        let runtime = try BundledPluginTestSupport.runtime(
+            "workbuddy", engine: engine, wallClock: Self.now,
+            transport: ProviderHTTPTransportHandler { request in
+                try Self.response(request, body: Self.route(request.url?.path ?? "").1)
+            })
+        _ = try await runtime.fetchUsage(
+            now: Self.now,
+            cookieSource: source,
+            cookieSessionResolver: { _, _ in sessions.next() },
+            cookieSessionValidator: { domain, id in accepted.append("\(domain):\(id)") })
+        #expect(accepted.values == (source == .auto ? ["www.workbuddy.cn:\(sessions.candidates[0].id)"] : []))
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `cookie policy keeps values in the host and admits gated background reads`(
+        engine: ProviderPluginEngineKind) throws
+    {
+        let runtime = try BundledPluginTestSupport.runtime(
+            "workbuddy", engine: engine, wallClock: Self.now,
+            transport: ProviderHTTPTransportHandler { _ in throw URLError(.badURL) })
+        let policy = try #require(runtime.manifest.cookiePolicy)
+        #expect(policy.selection == .requestURL)
+        #expect(policy.cache == .validatedSingleEntry)
+        #expect(policy.allowsImportAttempt(runtime: .app, interaction: .background))
+        #expect(policy.allowsImportAttempt(runtime: .cli, interaction: .userInitiated))
+    }
+
+    private final class PathTrace: @unchecked Sendable {
+        private let lock = NSLock()
+        private var paths: [String] = []
+        func append(_ path: String) { self.lock.withLock { self.paths.append(path) } }
+        var values: [String] {
+            self.lock.withLock { self.paths }
+        }
+    }
+
+    private final class SessionTrace: @unchecked Sendable {
+        let candidates: [ProviderPluginCookieSession]
+        private let lock = NSLock()
+        private var index = 0
+        private var requests: [String] = []
+        private var rejections: [String] = []
+
+        init(headers: [String]) {
+            self.candidates = headers.map {
+                ProviderPluginCookieSession(header: $0, source: "Fixture", origin: "https://www.workbuddy.cn")
+            }
+        }
+
+        func next() -> ProviderPluginCookieSession? {
+            self.lock.withLock {
+                guard self.index < self.candidates.count else { return nil }
+                defer { self.index += 1 }
+                return self.candidates[self.index]
+            }
+        }
+
+        func request(_ header: String) { self.lock.withLock { self.requests.append(header) } }
+        func reject(_ id: String) { self.lock.withLock { self.rejections.append(id) } }
+        var consumed: Int {
+            self.lock.withLock { self.index }
+        }
+
+        var requested: [String] {
+            self.lock.withLock { self.requests }
+        }
+
+        var rejected: [String] {
+            self.lock.withLock { self.rejections }
+        }
+    }
+
+    private static func chromeUserAgent(_ major: Int) -> String {
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
+            + "Chrome/\(major).0.0.0 Safari/537.36"
+    }
+
+    private static func route(_ path: String) -> (Int, String) {
+        switch path {
+        case self.summaryPath: (200, self.summary)
+        case self.freePath: (200, self.freePackages)
+        default: (200, self.emptyPackages)
+        }
+    }
+
+    static func fetch(
+        engine: ProviderPluginEngineKind,
+        routes: [String: (Int, String)] = [:]) async throws -> UsageSnapshot
+    {
+        let runtime = try BundledPluginTestSupport.runtime(
+            "workbuddy",
+            engine: engine,
+            transport: ProviderHTTPTransportHandler { request in
+                let path = request.url?.path ?? ""
+                let (status, body) = routes[path] ?? Self.route(path)
+                return try Self.response(request, body: body, status: status)
+            })
+        let sessions = SessionTrace(headers: [Self.fixtureCookie])
+        return try await runtime.fetchUsage(
+            now: Self.now,
+            cookieSessionResolver: { domain, _ in
+                #expect(domain == "www.workbuddy.cn")
+                return sessions.next()
+            },
+            cookieSessionValidator: { _, _ in })
+    }
+
+    private static let fixtureCookie = "session=fixture-session; locale=zh"
+
+    private static func expectFailure(
+        _ kind: ProviderFetchClassifiedError.Kind,
+        perform: () async throws -> Void) async
+    {
+        do {
+            try await perform()
+            Issue.record("Expected classified failure \(kind)")
+        } catch let error as ProviderFetchClassifiedError {
+            #expect(error.kind == kind)
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    /// Plugin snapshots hide extra windows unless the provider descriptor asks for them, so the wiring is
+    /// part of the feature: without it the window exists in the snapshot but never reaches a surface.
+    @Test
+    func `the reward window reaches the card and the CLI`() {
+        let rewards = NamedRateWindow(
+            id: "rewards",
+            title: "Rewards",
+            window: RateWindow(
+                usedPercent: 70.96774193548387,
+                windowMinutes: nil,
+                resetsAt: nil,
+                resetDescription: "621 / 2,139 credits left"))
+        let snapshot = UsageSnapshot(
+            primary: nil,
+            secondary: nil,
+            extraRateWindows: [rewards],
+            updatedAt: Date(timeIntervalSince1970: 0))
+        let presentation = WorkBuddyProviderDescriptor.descriptor.presentation
+        #expect(presentation.extraRateWindows(snapshot: snapshot).map(\.id) == ["rewards"])
+        // The balance lives in the description, so the card has to print it as the detail line.
+        #expect(presentation.menuCard.extraRateWindowShowsResetDescriptionAsDetail(rewards))
+    }
+
+    private static func response(
+        _ request: URLRequest,
+        body: String,
+        status: Int = 200) throws -> (Data, URLResponse)
+    {
+        let response = try #require(HTTPURLResponse(
+            url: request.url!,
+            statusCode: status,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]))
+        return (Data(body.utf8), response)
+    }
+}

@@ -311,7 +311,8 @@ struct CodexCredentialFileAccessTests {
         for path in [
             "Sources/CodexBarCore/Providers/Codex/CodexOAuth/CodexOAuthCredentials.swift",
             "Sources/CodexBarCore/CodexManagedAccounts.swift",
-            "Sources/CodexBar/CodexAccountPromotionService.swift",
+            "Sources/CodexBar/Providers/Codex/CodexAccountPromotionService.swift",
+            "Sources/CodexBarCore/Providers/Codex/CodexAccountPromotionTransaction.swift",
         ] {
             let source = try String(contentsOf: root.appendingPathComponent(path), encoding: .utf8)
             #expect(
@@ -322,7 +323,7 @@ struct CodexCredentialFileAccessTests {
         for (path, signature) in [
             ("Sources/CodexBarCore/Providers/Codex/CodexOAuth/CodexOAuthCredentials.swift", "public static func save("),
             (
-                "Sources/CodexBar/CodexAccountPromotionService.swift",
+                "Sources/CodexBarCore/Providers/Codex/CodexAccountPromotionTransaction.swift",
                 "func swapLiveAuthData(_ data: Data, liveHomeURL: URL) throws {"),
         ] {
             let source = try String(contentsOf: root.appendingPathComponent(path), encoding: .utf8)

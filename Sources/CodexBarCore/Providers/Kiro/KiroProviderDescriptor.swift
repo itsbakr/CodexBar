@@ -33,13 +33,19 @@ public enum KiroProviderDescriptor {
                     ProviderColor(hex: 0x9046FF),
                     ProviderColor(hex: 0xCAA9FF),
                     ProviderColor(hex: 0x2B2B2B),
-                ],
-                widgetColor: ProviderColor(hex: 0xFF9900)),
+                ]),
             tokenCost: ProviderTokenCostConfig(
                 supportsTokenCost: false,
                 noDataMessage: { "Kiro cost summary is not supported." }),
-            presentation: ProviderUsagePresentation(menuCard: ProviderMenuCardPresentation(
-                primaryDetailKind: .kiroCredits)),
+            pace: .calendarMonthResetWindow,
+            presentation: ProviderUsagePresentation(
+                menuBarWindowResolver: { context in
+                    guard context.metric == .automatic else { return .unhandled }
+                    return .resolved(
+                        ProviderUsagePresentation.exhausted(context.snapshot.primary, context.snapshot.secondary)
+                            ?? context.snapshot.primary ?? context.snapshot.secondary)
+                },
+                menuCard: ProviderMenuCardPresentation(primaryDetailKind: .kiroCredits)),
             fetchPlan: ProviderFetchPlan(
                 sourceModes: [.auto, .cli],
                 pipeline: ProviderFetchPipeline(resolveStrategies: { _ in [KiroCLIFetchStrategy()] })),
@@ -54,13 +60,28 @@ struct KiroCLIFetchStrategy: ProviderFetchStrategy {
     let id: String = "kiro.cli"
     let kind: ProviderFetchKind = .cli
 
+    private let checkConnectivity: @Sendable () async throws -> Void
+    private let makeProbe: @Sendable () -> KiroStatusProbe
+
+    init(
+        checkConnectivity: @escaping @Sendable () async throws -> Void = {
+            try await KiroUsageLimitsAPI.ensureReachable()
+        },
+        makeProbe: @escaping @Sendable () -> KiroStatusProbe = { KiroStatusProbe() })
+    {
+        self.checkConnectivity = checkConnectivity
+        self.makeProbe = makeProbe
+    }
+
     func isAvailable(_: ProviderFetchContext) async -> Bool {
         TTYCommandRunner.which("kiro-cli") != nil
     }
 
     func fetch(_: ProviderFetchContext) async throws -> ProviderFetchResult {
-        let probe = KiroStatusProbe()
-        let snap = try await probe.fetch()
+        if ProviderInteractionContext.current == .background {
+            try await self.checkConnectivity()
+        }
+        let snap = try await self.makeProbe().fetch()
         return self.makeResult(
             usage: snap.toUsageSnapshot(),
             sourceLabel: "cli")

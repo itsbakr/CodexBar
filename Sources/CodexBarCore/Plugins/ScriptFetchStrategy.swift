@@ -37,13 +37,14 @@ public final class ScriptFetchStrategy: ProviderFetchStrategy, @unchecked Sendab
     private let bundledPlugin: String
     private let sourceLabel: String
     private let secretKey: String?
-    private let resolveValues: ValuesResolver
+    let resolveValues: ValuesResolver
     private let validateContext: ContextValidator
     private let isEnabled: EnabledResolver
     private let transport: any ProviderHTTPTransport
-    private let timeout: TimeInterval
+    let timeout: TimeInterval
     private let lock = NSLock()
-    private var runtime: ProviderPluginRuntime?
+    private(set) var runtime: ProviderPluginRuntime?
+    private var runtimeInUse = false
 
     public init(
         id: String,
@@ -123,7 +124,8 @@ public final class ScriptFetchStrategy: ProviderFetchStrategy, @unchecked Sendab
         if let secretKey, values.secrets[secretKey]?.isEmpty != false {
             throw ProviderPluginError.secretAccess("required provider secret is unavailable")
         }
-        let runtime = try self.loadedRuntime()
+        let runtime = try self.acquireRuntime()
+        defer { self.releaseRuntime(runtime) }
         guard runtime.manifest.id == self.provider.instanceID else {
             throw ProviderPluginError.invalidManifest(
                 "bundled plugin id '\(runtime.manifest.id.rawValue)' does not match '\(self.provider.rawValue)'")
@@ -141,16 +143,11 @@ public final class ScriptFetchStrategy: ProviderFetchStrategy, @unchecked Sendab
             policy: runtime.manifest.cookiePolicy,
             settingsOverride: self.cookieSettings?(context))
         let result = try await runtime.fetchResult(
-            settings: values.settings,
-            secrets: values.secrets,
-            sourceMode: context.sourceMode,
-            cookieSource: cookies.cookieSource,
-            cookieInvalidator: { cookies.rejectCookie(domain: $0) },
-            cookieSessionResolver: { try cookies.nextSession(domain: $0, cachedOnly: $1) },
-            cookieSessionInvalidator: { cookies.rejectCookie(domain: $0, id: $1) },
-            cookieSessionValidator: { try cookies.acceptCookie(domain: $0, id: $1) },
-            cookieResolver: { _, domain in try cookies.cookieHeader(domain: domain) })
+            cookies: cookies, settings: values.settings, secrets: values.secrets, sourceMode: context.sourceMode)
         try Task.checkCancellation()
+        if runtime.manifest.cookiePolicy?.cache == .nonpersistent {
+            CookieHeaderCache.markNonpersistentRefreshValidated(provider: self.provider)
+        }
         let saved = result.persist.isEmpty ? ProviderSettingsSaveOutcome.unchanged
             : await context.settingsWriter?(self.provider, result.persist) ?? .failed
         try Task.checkCancellation()
@@ -162,17 +159,28 @@ public final class ScriptFetchStrategy: ProviderFetchStrategy, @unchecked Sendab
         false
     }
 
-    private func loadedRuntime() throws -> ProviderPluginRuntime {
+    private func acquireRuntime() throws -> ProviderPluginRuntime {
         self.lock.lock()
         defer { self.lock.unlock() }
-        if let runtime = self.runtime {
+        if let runtime = self.runtime, !self.runtimeInUse {
+            self.runtimeInUse = true
             return runtime
         }
         let runtime = try ProviderPluginRuntime(
             bundledPlugin: self.bundledPlugin,
             transport: self.transport,
             timeout: self.timeout)
-        self.runtime = runtime
+        // Overlapping accounts need independent workers and fetch deadlines.
+        if !self.runtimeInUse {
+            self.runtime = runtime
+            self.runtimeInUse = true
+        }
         return runtime
+    }
+
+    private func releaseRuntime(_ runtime: ProviderPluginRuntime) {
+        self.lock.withLock {
+            if self.runtime === runtime { self.runtimeInUse = false }
+        }
     }
 }

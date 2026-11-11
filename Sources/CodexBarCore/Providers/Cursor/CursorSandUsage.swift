@@ -16,6 +16,8 @@ public struct CursorSandUsageStatus: Decodable, Sendable, Equatable {
     public let hasNonZeroIncludedLimit: Bool?
     public let includedLimitZero: Bool?
     public let sandTrialExpiresAt: String?
+    /// The X Subscription accounts share this weekly pool across Cursor and Grok products.
+    public let isUnified: Bool?
 
     public init(
         currentPeriodStart: String?,
@@ -24,7 +26,8 @@ public struct CursorSandUsageStatus: Decodable, Sendable, Equatable {
         hasAvailableUsage: Bool?,
         hasNonZeroIncludedLimit: Bool? = nil,
         includedLimitZero: Bool? = nil,
-        sandTrialExpiresAt: String? = nil)
+        sandTrialExpiresAt: String? = nil,
+        isUnified: Bool? = nil)
     {
         self.currentPeriodStart = currentPeriodStart
         self.nextResetTimestampUtc = nextResetTimestampUtc
@@ -33,6 +36,7 @@ public struct CursorSandUsageStatus: Decodable, Sendable, Equatable {
         self.hasNonZeroIncludedLimit = hasNonZeroIncludedLimit
         self.includedLimitZero = includedLimitZero
         self.sandTrialExpiresAt = sandTrialExpiresAt
+        self.isUnified = isUnified
     }
 
     /// Included or unexpired trial allowance; trial expiry is not a recurring quota reset.
@@ -42,14 +46,14 @@ public struct CursorSandUsageStatus: Decodable, Sendable, Equatable {
         guard hasLimit == true || hasTrial, let usagePercent = self.usagePercent else {
             return nil
         }
-        let start = ISO8601DateParser.parse(self.currentPeriodStart)
+        // Paid Grok Bot grants reset weekly; currentPeriodStart can fall mid-week.
         let resetsAt = hasTrial ? nil : ISO8601DateParser.parse(self.nextResetTimestampUtc)
         return NamedRateWindow(
             id: Self.extraWindowID,
             title: Self.extraWindowTitle,
             window: RateWindow(
                 usedPercent: UsagePercent(raw: usagePercent).displayClamped,
-                windowMinutes: Self.windowMinutes(start: start, end: resetsAt),
+                windowMinutes: resetsAt == nil ? nil : 10080,
                 resetsAt: resetsAt,
                 resetDescription: resetsAt.map(resetDescription)))
     }

@@ -3,21 +3,24 @@ import Foundation
 extension AntigravityLocalReader {
     struct Context: Sendable {
         let home: URL
+        let additionalProfileHomes: [String]
         @ProcessEnvironment private(set) var environment: [String: String]
 
-        init(environment: [String: String]) {
+        init(environment: [String: String], additionalProfileHomes: [String] = []) {
+            self.additionalProfileHomes = additionalProfileHomes
             self.environment = environment
             self.home = environment["HOME"].map { URL(fileURLWithPath: $0, isDirectory: true) }
                 ?? FileManager.default.homeDirectoryForCurrentUser
         }
 
         var databaseRoots: [URL] {
-            let app = AntigravityOfflineStore.appDataDirectory(home: self.home, env: self.environment)
-            return [
-                AntigravityOfflineStore.conversationsDirectory(home: self.home, env: self.environment),
-                app,
-                app.appendingPathComponent("conversations", isDirectory: true),
-            ]
+            AntigravityOfflineStore.geminiHomeDirectories(
+                home: self.home, env: self.environment, additionalProfileHomes: self.additionalProfileHomes)
+                .flatMap { home in
+                    ["antigravity-cli/conversations", "antigravity", "antigravity/conversations"].map {
+                        home.appendingPathComponent($0, isDirectory: true)
+                    }
+                }
         }
 
         var cacheRoot: URL {
@@ -32,14 +35,14 @@ extension AntigravityLocalReader {
         var databases = 500
         var directoryEntries = 10000
         var rowsPerDatabase = 10000
-        var rows = 50000
+        var rows = 100_000
         var blobBytes = 16 * 1024 * 1024
         var databaseBytes = 64 * 1024 * 1024
-        var bytes = 128 * 1024 * 1024
+        var bytes = 512 * 1024 * 1024
         var schemaEntries = 128
         var schemaColumns = 64
         var schemaBytes = 64 * 1024
-        var duration: TimeInterval = 5
+        var duration: TimeInterval = 30
     }
 
     struct Statistics: Sendable {
@@ -181,5 +184,17 @@ extension AntigravityLocalReader {
         }
         result.paths.sort { $0.path < $1.path }
         return result
+    }
+}
+
+extension CostUsageFetcher {
+    package static func antigravityHistoryScope(
+        environment: [String: String], additionalProfileHomes: [String]) -> String
+    {
+        let context = AntigravityLocalReader.Context(
+            environment: environment, additionalProfileHomes: additionalProfileHomes)
+        return Set((context.databaseRoots + [context.cacheRoot])
+            .map { $0.standardizedFileURL.resolvingSymlinksInPath().path })
+            .sorted().joined(separator: "\0")
     }
 }

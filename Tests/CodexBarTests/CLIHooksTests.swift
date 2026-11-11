@@ -1,9 +1,46 @@
 import CodexBarCore
+import Commander
 import Foundation
 import Testing
 @testable import CodexBarCLI
 
 struct CLIHooksTests {
+    @Test
+    func `watch rejects intervals that overflow rounded nanoseconds`() throws {
+        for raw in ["1e100", "19000000000", "18446744073.709553"] {
+            let result = CodexBarCLI.decodeHooksWatchInterval(
+                from: ParsedValues(positional: [], options: ["interval": [raw]], flags: []))
+            guard case .failure = result else {
+                Issue.record("An unrepresentable interval was accepted: \(raw)")
+                continue
+            }
+        }
+        for raw in ["60.5", "18000000000"] {
+            let result = CodexBarCLI.decodeHooksWatchInterval(
+                from: ParsedValues(positional: [], options: ["interval": [raw]], flags: []))
+            #expect(try result.get() == Double(raw))
+        }
+    }
+
+    @Test
+    func `watch provider option accepts all both and deduplicates concrete names`() throws {
+        let allResult = CodexBarCLI.decodeHooksWatchProviderNames(
+            from: ParsedValues(positional: [], options: ["provider": ["all"]], flags: []))
+        #expect(try allResult.get() == ProviderDescriptorRegistry.all.map(\.id))
+
+        let bothResult = CodexBarCLI.decodeHooksWatchProviderNames(
+            from: ParsedValues(positional: [], options: ["provider": ["both", "codex", "codex"]], flags: []))
+        let both = try #require(try bothResult.get())
+        #expect(both == [.codex, .claude])
+
+        guard case .failure = CodexBarCLI.decodeHooksWatchProviderNames(
+            from: ParsedValues(positional: [], options: ["provider": ["bogus"]], flags: []))
+        else {
+            Issue.record("Expected an unknown provider to fail")
+            return
+        }
+    }
+
     @Test
     func `watch privacy keeps account routing private and skips synthetic lanes`() {
         let usage = UsageSnapshot(

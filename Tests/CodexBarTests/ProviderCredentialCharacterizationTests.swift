@@ -54,6 +54,7 @@ struct ProviderCredentialCharacterizationTests {
             .init(provider: .warp, environmentKey: "WARP_API_KEY"),
             .init(provider: .codebuff, environmentKey: "CODEBUFF_API_KEY"),
             .init(provider: .doubao, environmentKey: "ARK_API_KEY"),
+            .init(provider: .commandcode, environmentKey: "COMMAND_CODE_API_KEY"),
         ]
 
         for fixture in fixtures {
@@ -220,10 +221,12 @@ struct ProviderCredentialCharacterizationTests {
             (.grok, "GROK_OAUTH_TOKEN"),
             (.huggingface, "CODEXBAR_HUGGINGFACE_API_KEY"),
             (.doubao, "ARK_API_KEY"),
+            (.clinepass, "CLINE_API_KEY"),
         ]
         let cookieProviders: [UsageProvider] = [
             .claude, .cursor, .opencode, .opencodego, .factory, .minimax, .manus,
             .augment, .ollama, .abacus, .mistral, .qoder, .stepfun, .replicate, .typesafe, .kimi,
+            .commandcode,
         ]
 
         for (provider, key) in environmentProviders {
@@ -263,6 +266,7 @@ struct ProviderCredentialCharacterizationTests {
             .replicate: "account-token",
             .typesafe: "account-token",
             .kimi: "kimi-auth=account-token",
+            .commandcode: "account-token",
         ]
         for provider in cookieProviders {
             #expect(TokenAccountSupportCatalog.normalizedCookieHeader(
@@ -299,6 +303,7 @@ struct ProviderCredentialCharacterizationTests {
             (.sub2api, "SUB2API_API_KEY"), (.antigravity, "ANTIGRAVITY_OAUTH_CREDENTIALS_JSON"),
             (.ibmbob, "BOBSHELL_API_KEY"),
             (.huggingface, "CODEXBAR_HUGGINGFACE_API_KEY"),
+            (.clinepass, "CLINE_API_KEY"),
         ]
         let account = ProviderTokenAccount(
             id: UUID(), label: "fixture", token: "account-token", addedAt: 0, lastUsed: nil)

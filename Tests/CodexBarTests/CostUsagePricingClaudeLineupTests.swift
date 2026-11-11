@@ -5,6 +5,10 @@ import Testing
 struct CostUsagePricingClaudeLineupTests {
     /// 1000 input, 10000 cache reads, 2000 5m writes, 1000 1h writes (2x input), and 500 output tokens.
     @Test(arguments: [
+        ("claude-fable-5-2", 0.066),
+        ("global.anthropic.claude-fable-5-2", 0.066),
+        ("claude-mythos-5-2", 0.066),
+        ("claude-haiku-5-5", 0.0009),
         ("claude-fable-5-1", 0.0825),
         ("claude-mythos-5-1", 0.0825),
         ("claude-mythos-5", 0.09),
@@ -13,8 +17,8 @@ struct CostUsagePricingClaudeLineupTests {
         ("anthropic.claude-opus-5-5", 0.034),
         ("us.anthropic.claude-opus-5-5", 0.034),
         ("claude-sonnet-5", 0.018),
-        ("claude-sonnet-5-5", 0.018),
-        ("global.anthropic.claude-sonnet-5-5", 0.018),
+        ("claude-sonnet-5-5", 0.017),
+        ("global.anthropic.claude-sonnet-5-5", 0.017),
     ])
     func `bundled current lineup rows price every token bucket`(model: String, expected: Double) throws {
         let cost = try #require(CostUsagePricing.claudeCostUSD(
@@ -36,6 +40,27 @@ struct CostUsagePricingClaudeLineupTests {
             cacheReadInputTokens: 0,
             cacheCreationInputTokens: 0,
             outputTokens: 0,
+            modelsDevCatalog: ModelsDevCatalog(providers: [:])))
+        #expect(abs(cost - expected) < 1e-12)
+    }
+
+    /// Haiku 5.5 prices the whole request at the higher tier once its prompt, including cache reads, exceeds 100K.
+    @Test(arguments: [
+        (90000, 10000, 1000, 0.0096),
+        (90000, 20000, 1000, 0.0485),
+    ])
+    func `haiku 5 5 switches tiers above a 100K token prompt`(
+        input: Int,
+        cacheRead: Int,
+        output: Int,
+        expected: Double) throws
+    {
+        let cost = try #require(CostUsagePricing.claudeCostUSD(
+            model: "claude-haiku-5-5",
+            inputTokens: input,
+            cacheReadInputTokens: cacheRead,
+            cacheCreationInputTokens: 0,
+            outputTokens: output,
             modelsDevCatalog: ModelsDevCatalog(providers: [:])))
         #expect(abs(cost - expected) < 1e-12)
     }

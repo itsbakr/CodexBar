@@ -34,12 +34,13 @@ struct CostUsageHourlyReportLinuxTests {
             output: 0,
             knownCostNanos: 9_000_000_000,
             pricingMode: "standard")
-        let usage = CostUsageScanner.makeFileUsage(
+        let usage = CostUsageFileUsage(
             mtimeUnixMs: afterRow.timestampUnixMs ?? 0,
             size: 1,
             days: [dayKey: [model: [200, 0, 0]]],
             parsedBytes: 1,
             sessionId: "session",
+            codexCostCacheComplete: true,
             codexRows: [beforeRow, afterRow],
             codexScanComplete: true)
         var cache = CostUsageCache()
@@ -113,12 +114,13 @@ struct CostUsageHourlyReportLinuxTests {
             output: 0,
             knownCostNanos: 9_000_000_000,
             pricingMode: "standard")
-        let usage = CostUsageScanner.makeFileUsage(
+        let usage = CostUsageFileUsage(
             mtimeUnixMs: afterRow.timestampUnixMs ?? 0,
             size: 1,
             days: [dayKey: [model: [1000, 0, 0]]],
             parsedBytes: 1,
             sessionId: "half-hour-session",
+            codexCostCacheComplete: true,
             codexRows: [beforeRow, afterRow],
             codexScanComplete: true)
         var cache = CostUsageCache()
@@ -215,11 +217,12 @@ struct CostUsageHourlyReportLinuxTests {
                 costPriced: false,
                 isIncomplete: true))
         }
-        let usage = CostUsageScanner.makeFileUsage(
+        let usage = CostUsageFileUsage(
             mtimeUnixMs: afterRow.timestampUnixMs ?? 0,
             size: 1,
             days: [:],
             parsedBytes: 1,
+            codexCostCacheComplete: true,
             claudeRows: rows)
         var cache = CostUsageCache()
         cache.files = ["/claude.jsonl": usage]
@@ -341,5 +344,20 @@ struct CostUsageHourlyReportLinuxTests {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
         return calendar
+    }
+}
+
+extension CostUsageScanner {
+    static func buildClaudeReportFromCache(
+        cache: CostUsageCache,
+        range: CostUsageDayRange,
+        now: Date = Date(),
+        modelsDevCacheRoot: URL? = nil) -> CostUsageDailyReport
+    {
+        self.buildClaudeReportFromCache(
+            cache: cache,
+            rows: self.reconciledClaudeRows(cache: cache),
+            range: range,
+            pricingResolver: CostUsagePricing.ClaudeResolver(now: now, cacheRoot: modelsDevCacheRoot))
     }
 }

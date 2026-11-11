@@ -175,25 +175,58 @@ struct AntigravityDeadlineTests {
                 source: .languageServer),
         ]
         let recorder = AntigravityTimeoutRecorder()
-        let deadline = Date().addingTimeInterval(2)
+        let clock = AntigravityDeadlineClock()
+        let deadline = clock.now().addingTimeInterval(1)
 
-        let resolved = try await AntigravityStatusProbe.resolveWorkingEndpoint(
-            candidateEndpoints: endpoints,
-            timeout: 1,
-            deadline: deadline,
-            testConnectivity: { endpoint, timeout in
-                recorder.append(timeout)
-                if endpoint.port == 64001 {
-                    try? await Task.sleep(for: .seconds(timeout))
-                    return false
-                }
-                return true
-            })
+        let resolved = try await AntigravityStatusProbe.$deadlineNow.withValue(clock.now) {
+            try await AntigravityStatusProbe.resolveWorkingEndpoint(
+                candidateEndpoints: endpoints,
+                timeout: 1,
+                deadline: deadline,
+                testConnectivity: { endpoint, timeout in
+                    recorder.append(timeout)
+                    if endpoint.port == 64001 {
+                        clock.advance(by: timeout)
+                        return false
+                    }
+                    return true
+                })
+        }
 
         let timeouts = recorder.snapshot()
         #expect(resolved.port == 64002)
-        #expect(timeouts.count == 2)
-        #expect(timeouts[0] < 1.1)
-        #expect(timeouts[1] > 0)
+        #expect(timeouts == [0.5, 0.5])
+    }
+}
+
+final class AntigravityDeadlineClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var date = Date(timeIntervalSince1970: 1000)
+
+    func now() -> Date { self.lock.withLock { self.date } }
+
+    func advance(by interval: TimeInterval) {
+        self.lock.withLock { self.date.addTimeInterval(interval) }
+    }
+}
+
+struct AntigravityIdentitySessionTests {
+    @Test
+    func `full identity budgets share a stateless pool while shorter deadlines stay private`() {
+        let first = AntigravityScopedAgyStaging.identitySession(timeout: 15)
+        let second = AntigravityScopedAgyStaging.identitySession(timeout: 15)
+        #expect(first === second)
+        #expect(first.configuration.timeoutIntervalForRequest == 15)
+        #expect(first.configuration.timeoutIntervalForResource == 15)
+        #expect(first.configuration.httpCookieStorage == nil)
+        #expect(first.configuration.urlCredentialStorage == nil)
+        #expect(first.configuration.urlCache == nil)
+        #expect(first.delegate is ProviderHTTPRedirectGuardDelegate)
+        let short = AntigravityScopedAgyStaging.identitySession(timeout: 2)
+        let anotherShort = AntigravityScopedAgyStaging.identitySession(timeout: 2)
+        defer { short.invalidateAndCancel(); anotherShort.invalidateAndCancel() }
+        #expect(short !== first && short !== anotherShort)
+        #expect(short.configuration.timeoutIntervalForRequest == 2)
+        #expect(short.configuration.timeoutIntervalForResource == 2)
     }
 }

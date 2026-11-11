@@ -29,13 +29,11 @@ public enum VeniceProviderDescriptor {
         dashboardURL: "https://venice.ai/settings/api",
         color: ProviderColor(hex: 0x3C8FDD),
         confetti: [0x0E2942, 0xF7F5ED, 0x3C8FDD],
-        widgetColor: ProviderColor(hex: 0x3399FF),
         noDataMessage: "Venice per-day cost history is not available via API.",
         aliases: ["ven"],
         webSource: .init(
             settingsSection: .init(VeniceProviderSettingsKey.self, cookieSettings: VeniceProviderSettings.self),
-            browserCookieOrder: BrowserCookieImportSupport.chromeOnly(
-                reason: "Preserve Chrome web sessions without unrelated Keychain prompts"),
+            browserCookieOrder: ProviderBrowserCookieDefaults.defaultImportOrder,
             mode: .sessionOrAPI,
             // Auto uses the API key; only explicit web mode requires browser support.
             browserSupportExemption: { sourceMode, _, _ in sourceMode == .auto },

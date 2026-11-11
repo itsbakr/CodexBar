@@ -5,13 +5,39 @@ public enum FileManagedCodexAccountStoreError: Error, Equatable, Sendable {
 }
 
 public protocol ManagedCodexAccountStoring: Sendable {
+    var lockURL: URL? { get }
     func loadAccounts() throws -> ManagedCodexAccountSet
     func storeAccounts(_ accounts: ManagedCodexAccountSet) throws
     func ensureFileExists() throws -> URL
 }
 
-public struct FileManagedCodexAccountStore: ManagedCodexAccountStoring, @unchecked Sendable {
+/// A store capability whose implementations must read registry metadata without credential hydration or persistence.
+public protocol ManagedCodexAccountMetadataLoading: Sendable {
+    func loadAccountMetadata() throws -> ManagedCodexAccountSet
+}
+
+extension ManagedCodexAccountStoring {
+    public var lockURL: URL? {
+        nil
+    }
+}
+
+public struct FileManagedCodexAccountStore: ManagedCodexAccountStoring, ManagedCodexAccountMetadataLoading,
+    @unchecked Sendable
+{
     public static let currentVersion = 3
+
+    package enum Mutation: String, Sendable {
+        case addOrReauth = "add-or-reauth"
+        case remove
+        case promotionAppend = "promotion-append"
+        case promotionRepair = "promotion-repair"
+        case promotionRefresh = "promotion-refresh"
+        case registryWrite = "registry-write"
+    }
+
+    @TaskLocal package static var mutation: Mutation = .registryWrite
+    var logger = CodexBarLog.logger(LogCategories.codexAccounts)
 
     private let fileURL: URL
     private let fileManager: FileManager
@@ -22,6 +48,19 @@ public struct FileManagedCodexAccountStore: ManagedCodexAccountStoring, @uncheck
     }
 
     public func loadAccounts() throws -> ManagedCodexAccountSet {
+        let accounts = try self.readAccountSet()
+        return accounts.version == Self.currentVersion
+            ? ManagedCodexAccountSet(version: accounts.version, accounts: accounts.accounts)
+            : self.migrateLegacyAccounts(accounts)
+    }
+
+    /// Reads metadata without hydrating legacy fields from credential files or writing migrations.
+    public func loadAccountMetadata() throws -> ManagedCodexAccountSet {
+        let accounts = try self.readAccountSet()
+        return ManagedCodexAccountSet(version: accounts.version, accounts: accounts.accounts)
+    }
+
+    private func readAccountSet() throws -> ManagedCodexAccountSet {
         guard self.fileManager.fileExists(atPath: self.fileURL.path) else {
             return Self.emptyAccountSet()
         }
@@ -32,16 +71,39 @@ public struct FileManagedCodexAccountStore: ManagedCodexAccountStoring, @uncheck
         guard (1...Self.currentVersion).contains(accounts.version) else {
             throw FileManagedCodexAccountStoreError.unsupportedVersion(accounts.version)
         }
-        if accounts.version == Self.currentVersion {
-            return ManagedCodexAccountSet(version: Self.currentVersion, accounts: accounts.accounts)
-        }
-        return self.migrateLegacyAccounts(accounts)
+        return accounts
+    }
+
+    public var lockURL: URL? {
+        self.fileURL.appendingPathExtension("lock")
     }
 
     public func storeAccounts(_ accounts: ManagedCodexAccountSet) throws {
+        try ManagedCodexAccountLock.withLock(at: self.lockURL) {
+            try self.storeAccountsLocked(accounts)
+        }
+    }
+
+    private func storeAccountsLocked(_ accounts: ManagedCodexAccountSet) throws {
+        let previous = try? self.readAccountSet()
         let normalizedAccounts = ManagedCodexAccountSet(
             version: Self.currentVersion,
             accounts: accounts.accounts)
+        var succeeded = false
+        defer {
+            let metadata = [
+                "operation": Self.mutation.rawValue,
+                "rows.before": previous.map { String($0.accounts.count) } ?? "unknown",
+                "rows.requested": String(accounts.accounts.count),
+                "rows.written": succeeded ? String(normalizedAccounts.accounts.count) : "unknown",
+                "result": succeeded ? "success" : "failed",
+            ]
+            if succeeded {
+                self.logger.info("Managed Codex account registry write", metadata: metadata)
+            } else {
+                self.logger.error("Managed Codex account registry write failed", metadata: metadata)
+            }
+        }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(normalizedAccounts)
@@ -53,12 +115,21 @@ public struct FileManagedCodexAccountStore: ManagedCodexAccountStoring, @uncheck
         // the same staged 0600 writer as auth.json so a newly-created file is never briefly
         // readable under a permissive umask.
         try CredentialFileWriter.writePrivate(data, to: self.fileURL)
+        succeeded = true
+    }
+
+    package static func logHomeDeletion(mutation: Mutation) {
+        CodexBarLog.logger(LogCategories.codexAccounts).info(
+            "Managed Codex account home deleted", metadata: ["operation": mutation.rawValue])
     }
 
     public func ensureFileExists() throws -> URL {
-        if self.fileManager.fileExists(atPath: self.fileURL.path) { return self.fileURL }
-        try self.storeAccounts(Self.emptyAccountSet())
-        return self.fileURL
+        try ManagedCodexAccountLock.withLock(at: self.lockURL) {
+            if !self.fileManager.fileExists(atPath: self.fileURL.path) {
+                try self.storeAccounts(Self.emptyAccountSet())
+            }
+            return self.fileURL
+        }
     }
 
     private static func emptyAccountSet() -> ManagedCodexAccountSet {
@@ -100,14 +171,15 @@ public struct FileManagedCodexAccountStore: ManagedCodexAccountStoring, @uncheck
     }
 
     public static func defaultURL() -> URL {
-        if CodexCredentialFileAccess.isTestContext {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser
+        let url = base
+            .appendingPathComponent("CodexBar", isDirectory: true)
+            .appendingPathComponent("managed-codex-accounts.json")
+        if CodexCredentialFileAccess.isTestContext, !CodexCredentialFileAccess.permits(url) {
             return FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
                 .appendingPathComponent("managed-codex-accounts.json")
         }
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser
-        return base
-            .appendingPathComponent("CodexBar", isDirectory: true)
-            .appendingPathComponent("managed-codex-accounts.json")
+        return url
     }
 }

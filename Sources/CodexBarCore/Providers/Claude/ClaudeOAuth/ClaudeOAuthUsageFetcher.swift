@@ -59,6 +59,8 @@ public enum ClaudeOAuthFetchError: LocalizedError, Sendable {
 
 enum ClaudeOAuthUsageFetcher {
     private static let baseURL = "https://api.anthropic.com"
+    private static let usageTransport = ProviderHTTPClient(
+        session: ProviderHTTPClient.redirectGuardedSession(configuration: Self.usageSessionConfiguration()))
     private static let usagePath = "/api/oauth/usage"
     private static let profilePath = "/api/oauth/profile"
     private static let betaHeader = "oauth-2025-04-20"
@@ -68,32 +70,44 @@ enum ClaudeOAuthUsageFetcher {
         accessToken: String,
         detectClaudeVersion: Bool = true,
         environment: [String: String] = ProcessInfo.processInfo.environment,
-        transport: any ProviderHTTPTransport = ProviderHTTPClient.shared) async throws -> OAuthUsageResponse
+        transport: any ProviderHTTPTransport = ClaudeOAuthUsageFetcher
+            .usageTransport) async throws -> OAuthUsageResponse
     {
         if let blockedUntil = ClaudeOAuthUsageRateLimitGate.blockedUntil(accessToken: accessToken) {
             throw ClaudeOAuthFetchError.rateLimited(retryAfter: blockedUntil)
         }
 
-        guard let url = URL(string: baseURL + usagePath) else {
+        guard let url = URL(string: baseURL + usagePath + "?cedar_ember=1") else {
             throw ClaudeOAuthFetchError.invalidResponse
         }
 
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = 30
+        request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         // OAuth usage endpoint currently requires the beta header.
         request.setValue(Self.betaHeader, forHTTPHeaderField: "anthropic-beta")
+        let userAgent = Self.claudeCodeUserAgent(
+            detectClaudeVersion: detectClaudeVersion,
+            versionDetector: { ProviderVersionDetector.claudeVersion(environment: environment) })
         request.setValue(
-            Self.claudeCodeUserAgent(
-                detectClaudeVersion: detectClaudeVersion,
-                versionDetector: { ProviderVersionDetector.claudeVersion(environment: environment) }),
+            userAgent.replacingOccurrences(of: "claude-code/", with: "claude-cli/") + " (external, cli)",
             forHTTPHeaderField: "User-Agent")
 
         do {
-            let response = try await transport.response(for: request)
+            var response = try await transport.response(for: request)
+            if response.statusCode == 400 || (response.statusCode == 403
+                && !(String(data: response.data, encoding: .utf8)?.contains("user:profile") ?? false))
+            {
+                // Retry only the optional inventory rejection, keeping the same credential and version.
+                try Task.checkCancellation()
+                request.url = URL(string: self.baseURL + self.usagePath)
+                request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+                response = try await transport.response(for: request)
+            }
             let data = response.data
             switch response.statusCode {
             case 200:
@@ -110,9 +124,6 @@ enum ClaudeOAuthUsageFetcher {
                 throw ClaudeOAuthFetchError.rateLimited(
                     retryAfter: ClaudeOAuthUsageRateLimitGate
                         .currentBlockedUntil(accessToken: accessToken) ?? retryAfter)
-            case 403:
-                let body = String(data: data, encoding: .utf8)
-                throw ClaudeOAuthFetchError.serverError(response.statusCode, body)
             default:
                 let body = String(data: data, encoding: .utf8)
                 throw ClaudeOAuthFetchError.serverError(response.statusCode, body)
@@ -124,6 +135,15 @@ enum ClaudeOAuthUsageFetcher {
         } catch {
             throw ClaudeOAuthFetchError.networkError(error)
         }
+    }
+
+    static func usageSessionConfiguration() -> URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForResource = 90
+        // Grant identifiers in the raw response must never enter the URL cache.
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return configuration
     }
 
     static func fetchProfile(
@@ -159,7 +179,10 @@ enum ClaudeOAuthUsageFetcher {
 
     static func decodeUsageResponse(_ data: Data) throws -> OAuthUsageResponse {
         let decoder = JSONDecoder()
-        return try decoder.decode(OAuthUsageResponse.self, from: data)
+        var usage = try decoder.decode(OAuthUsageResponse.self, from: data)
+        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        usage.limits = json.map(ClaudeWebExtraRateWindowParser.scopedWeeklyLimits)
+        return usage
     }
 
     private static func retryAfterDate(from response: HTTPURLResponse, now: Date = Date()) -> Date? {
@@ -264,12 +287,14 @@ struct OAuthUsageResponse: Decodable {
     let sevenDayOAuthApps: OAuthUsageWindow?
     let sevenDayOpus: OAuthUsageWindow?
     let sevenDaySonnet: OAuthUsageWindow?
-    let iguanaNecktie: OAuthUsageWindow?
+    let cloudCredits: ClaudeCloudCreditsSnapshot?
     let extraUsage: OAuthExtraUsage?
+    let resetStatus: ClaudeLimitResetStatusResponse?
     /// Newer shape (superseding the flat `seven_day_*` fields above for scoped weekly
     /// windows): a flat list of limit entries, each optionally naming the model it scopes
     /// to via `scope.model.display_name` (e.g. "Fable" during a promotional access window).
-    let limits: [OAuthLimitEntry]?
+    /// Filled by `ClaudeOAuthUsageFetcher.decodeUsageResponse` with the Web path's entry parser.
+    fileprivate(set) var limits: [ClaudeScopedWeeklyLimitMapper.Limit]?
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: DynamicCodingKey.self)
@@ -278,9 +303,9 @@ struct OAuthUsageResponse: Decodable {
         self.sevenDayOAuthApps = Self.decodeWindow(in: container, keys: ["seven_day_oauth_apps"])
         self.sevenDayOpus = Self.decodeWindow(in: container, keys: ["seven_day_opus"])
         self.sevenDaySonnet = Self.decodeWindow(in: container, keys: ["seven_day_sonnet"])
-        self.iguanaNecktie = Self.decodeWindow(in: container, keys: ["iguana_necktie"])
+        self.cloudCredits = Self.decodeValue(in: container, keys: ["iguana_necktie"])
         self.extraUsage = Self.decodeValue(in: container, keys: ["extra_usage"])
-        self.limits = Self.decodeValue(in: container, keys: ["limits"])
+        self.resetStatus = Self.decodeValue(in: container, keys: ["cedar_ember"])
     }
 
     private static func decodeWindow(
@@ -325,41 +350,6 @@ struct OAuthUsageWindow: Decodable {
     enum CodingKeys: String, CodingKey {
         case utilization
         case resetsAt = "resets_at"
-    }
-}
-
-/// A single entry from the `limits` array. `kind`/`group` classify the limit
-/// (e.g. `kind: "weekly_scoped"`, `group: "weekly"`); `scope.model.display_name` names the
-/// model it applies to when the limit is scoped to one, rather than the whole account.
-struct OAuthLimitEntry: Decodable {
-    let kind: String?
-    let group: String?
-    let percent: Double?
-    let resetsAt: String?
-    let scope: OAuthLimitScope?
-    let isActive: Bool?
-
-    enum CodingKeys: String, CodingKey {
-        case kind
-        case group
-        case percent
-        case resetsAt = "resets_at"
-        case scope
-        case isActive = "is_active"
-    }
-}
-
-struct OAuthLimitScope: Decodable {
-    let model: OAuthLimitScopeModel?
-}
-
-struct OAuthLimitScopeModel: Decodable {
-    let id: String?
-    let displayName: String?
-
-    enum CodingKeys: String, CodingKey {
-        case id
-        case displayName = "display_name"
     }
 }
 

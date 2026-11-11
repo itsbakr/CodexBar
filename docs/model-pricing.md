@@ -50,6 +50,7 @@ Local cost scanners preserve that scope when selecting a catalog:
 - OpenAI's [Daybreak aliases](https://developers.openai.com/api/docs/pricing) resolve like the unsuffixed `gpt-5.6` alias: `gpt-daybreak-blue-latest` prices as `gpt-5.6-sol` and `gpt-daybreak-red-latest` as `gpt-5.6-cyber`. Native usage rows retain raw model evidence; Codex aggregate model IDs follow the canonicalizer.
 - Antigravity's Gemini 3.1 Pro aliases (`gemini-pro-default`, `gemini-pro-agent`, and the `gemini-3.1-pro` effort tiers) price as `gemini-3.1-pro-preview`, the only catalogued Gemini 3.1 Pro row. The alias is provider-local; recorded model names stay unchanged.
 - Antigravity's safety-routed alias `gemini-3.7-flash-safety-le` prices as `gemini-3.7-flash`: the usage record's model enum ID matches ordinary `gemini-3.7-flash` turns. The alias is provider-local; the recorded model name stays unchanged.
+- Antigravity's exact recorded `gpt-oss-120b-medium` name falls back to `google-vertex` / `openai/gpt-oss-120b-maas` after existing model lookups. [Google's Vertex list price](https://cloud.google.com/vertex-ai/generative-ai/pricing) is $0.09 input and $0.36 output per million tokens (verified October 5, 2026); CodexBar reads the rates from [models.dev's catalog entry](https://github.com/anomalyco/models.dev/blob/8ce27fe1f811a0f63100826e9a7965af0afd96d9/providers/google-vertex/models/openai/gpt-oss-120b-maas.toml). Missing cache rates use the input rate, as in the existing Claude resolver. Unknown-price refresh includes this exact entry; other effort suffixes and reseller prices are not inferred. The displayed name stays unchanged, and dollars remain public API estimates rather than Antigravity charges.
 - Vertex AI Claude logs: models.dev provider id `google-vertex-anthropic`
 
 Dated Codex usage retains the prior bundled GPT-5.6 Sol rates before **2026-08-21 UTC**, the repricing date in the
@@ -57,11 +58,13 @@ Dated Codex usage retains the prior bundled GPT-5.6 Sol rates before **2026-08-2
 current rates. Terra and Luna retain their separate July 30 cutoff. Custom-pricing overlays retain precedence.
 
 Bundled Claude fallback rows price models that models.dev lacks. They follow
-[Anthropic's pricing page](https://platform.claude.com/docs/en/about-claude/pricing) as of **2026-10-01**.
-Claude 4.6 and later models bill the full context window at standard rates. Dated Opus 4.6 and Sonnet 4.6 usage
-always uses the bundled rates, with the earlier long-context premium before **2026-03-13 UTC**. One-hour cache
-writes cost 2x input.
-Cache hits cost 0.025x input on Fable 5.1 and Mythos 5.1 and 0.05x input on Opus 5.5. Fast-mode
+[Anthropic's pricing page](https://platform.claude.com/docs/en/about-claude/pricing) as of **2026-11-11**.
+Claude 4.6 and later models bill the full context window at standard rates, except Haiku 5.5: a request whose
+prompt (input plus cache reads and writes) exceeds 100K tokens pays Haiku 5.5's higher tier for every token.
+Dated Opus 4.6 and Sonnet 4.6 usage always uses the bundled rates, with the earlier long-context premium before
+**2026-03-13 UTC**. One-hour cache writes cost 2x input.
+Cache hits cost 0.025x input on Fable 5.2, Mythos 5.2, Fable 5.1 and Mythos 5.1 and 0.05x input on Opus 5.5 and
+Sonnet 5.5. Fast-mode
 (`usage.speed` `"fast"`) and US data-residency (`inference_geo` `"us"`) premiums are not applied.
 
 ### Explicit provider identity in OpenCodex
@@ -97,7 +100,21 @@ models.dev publishes costs as USD per 1M tokens. CodexBar converts those to USD 
 perToken = modelsDevCost / 1_000_000
 ```
 
-When models.dev includes `cost.context_over_200k`, CodexBar parses those values as the above-200k-token pricing lane and converts them with the same per-1M-token rule.
+When models.dev includes `cost.context_over_200k`, CodexBar converts those rates with the same per-1M-token rule.
+The legacy field name does not establish the threshold: a matching `cost.tiers` entry with `tier.type = "context"`
+supplies its explicit `tier.size`. Only the tier matching the legacy lane's rates is used; this does not add
+arbitrary multi-tier pricing. Older catalogs without that metadata use the bundled OpenAI model threshold,
+or 200,000 tokens when no provider-specific contract is known. Other providers never inherit OpenAI thresholds.
+
+OpenAI's [pricing table](https://developers.openai.com/api/docs/pricing) defines short context as **at most 272,000
+input tokens**, and long context as **more than 272,000**, including cached input. This applies to GPT-6 Astra,
+GPT-6.1 Sol, GPT-6 Sol, GPT-6 Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.4/5.5, and their Pro variants where listed.
+The bundled table preserves that boundary for old catalogs, including the GPT-5.6 and Daybreak Blue aliases.
+For example, GPT-6.1 Sol with 210,000 input tokens (200,000 cached) and 1,000 output tokens costs **$0.050** at
+Standard rates. At 272,001 input tokens the full request uses long-context rates, not just the excess tokens.
+Catalog thresholds and bundled rates participate in the native Codex pricing fingerprint, so affected cached
+estimates are repriced. Existing native rows and scan checkpoints remain compatible; recorded authoritative costs
+and explicit custom-pricing overrides retain their existing precedence.
 
 ## Custom pricing overlay
 
@@ -111,6 +128,8 @@ Linux: ${XDG_DATA_HOME:-~/.local/share}/CodexBar/custom-pricing.json
 The Linux CLI uses `FileManager`’s Application Support directory (XDG data home), not `~/.config`. Putting the file only under XDG config will be ignored.
 
 Values are USD per million tokens. For native Codex session scans, resolution order is **overlay > models.dev > builtin**. Changing the file invalidates the Codex pricing fingerprint so the next native Codex scan reloads rates.
+
+[Free Codex Auto-review requests](codex.md#cost-usage-local-log-scan) use **overlay > Auto-review waiver ($0) > models.dev > builtin**. A `codex-auto-review` or `openai/codex-auto-review` entry prices them at that rate. Without one, they cost $0, and models.dev and bundled rates never apply.
 
 The overlay applies to native Codex/OpenAI-compatible pricing and OpenCodex estimates. OpenCodex checks
 the recorded provider/model identity before its provider catalog; its caller-supplied snapshot overlay

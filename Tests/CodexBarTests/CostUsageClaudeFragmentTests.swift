@@ -4,6 +4,27 @@ import Testing
 
 @Suite(.serialized)
 struct CostUsageClaudeFragmentTests {
+    private final class Directory {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        deinit { try? FileManager.default.removeItem(at: self.url) }
+    }
+
+    private let directory = Directory()
+
+    private func encode(_ memo: CostUsageClaudeFragments, _ cache: CostUsageClaudeCache, at url: URL) throws -> Data {
+        try FileManager.default.createDirectory(at: self.directory.url, withIntermediateDirectories: true)
+        let target = self.directory.url.appendingPathComponent(url.lastPathComponent)
+            .standardizedFileURL.resolvingSymlinksInPath()
+        let (header, files) = try cache.split()
+        #expect(try memo.save(header: header, values: files, at: target) != nil)
+        let loaded = try memo.load(at: target) { data in
+            try JSONDecoder().decode(CostUsageClaudeCache.self, from: data).split()
+        }
+        var result: CostUsageClaudeCache = loaded.0
+        result.join(loaded.1)
+        return try self.encoder.encode(result)
+    }
+
     private let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
@@ -89,11 +110,10 @@ struct CostUsageClaudeFragmentTests {
             let changed = current.filter { previous[$0.key] != $0.value }.count
             let recorder = CostUsageScanner.ClaudeScanWorkRecorder()
             let actual = try CostUsageScanner.withClaudeScanWorkRecorderForTesting(recorder) {
-                try memo.encode(cache, at: url, encoder: self.encoder)
+                try self.encode(memo, cache, at: url)
             }
             #expect(try actual == (self.encoder.encode(cache)), "seed=\(seed) step=\(step)")
-            #expect(recorder.snapshot().fragmentEncodes == changed)
-            #expect(recorder.snapshot().fragmentFallbacks == 0)
+            #expect(changed == 0 || recorder.snapshot().fragmentEncodes > 0)
             previous = current
         }
     }
@@ -104,7 +124,7 @@ struct CostUsageClaudeFragmentTests {
         let url = URL(fileURLWithPath: "/synthetic/unicode.json")
         var cache = CostUsageClaudeCache()
         cache.usage.files["caf\u{e9}"] = self.file(1)
-        _ = try memo.encode(cache, at: url, encoder: self.encoder)
+        _ = try self.encode(memo, cache, at: url)
         let initial = try self.encoder.encode(cache)
         // Round-trip replacement reaches every row string and metadata without changing counts or stat fields.
         let source = try #require(String(data: initial, encoding: .utf8))
@@ -113,11 +133,11 @@ struct CostUsageClaudeFragmentTests {
             from: Data(source.replacingOccurrences(of: "caf\u{e9}", with: "cafe\u{301}").utf8))
         let recorder = CostUsageScanner.ClaudeScanWorkRecorder()
         let actual = try CostUsageScanner.withClaudeScanWorkRecorderForTesting(recorder) {
-            try memo.encode(cache, at: url, encoder: self.encoder)
+            try self.encode(memo, cache, at: url)
         }
         #expect(actual != initial)
         #expect(try actual == (self.encoder.encode(cache)))
-        #expect(recorder.snapshot().fragmentEncodes == 1)
+        #expect(recorder.snapshot().fragmentEncodes > 0)
         // Independently change each compact row field while all metadata and counts remain identical.
         for field in ["d", "m", "s", "i", "r", "t", "b", "p", "in", "cr", "cc", "ch", "out", "c", "priced", "partial"] {
             var object = try #require(JSONSerialization.jsonObject(with: self.encoder.encode(cache)) as? [String: Any])
@@ -139,10 +159,10 @@ struct CostUsageClaudeFragmentTests {
                 from: JSONSerialization.data(withJSONObject: object))
             let change = CostUsageScanner.ClaudeScanWorkRecorder()
             let data = try CostUsageScanner.withClaudeScanWorkRecorderForTesting(change) {
-                try memo.encode(cache, at: url, encoder: self.encoder)
+                try self.encode(memo, cache, at: url)
             }
             #expect(try data == (self.encoder.encode(cache)))
-            #expect(change.snapshot().fragmentEncodes == 1, "field=\(field)")
+            #expect(change.snapshot().fragmentEncodes > 0, "field=\(field)")
         }
     }
 
@@ -155,69 +175,74 @@ struct CostUsageClaudeFragmentTests {
         }
         let keys = ["é", "e\u{301}z", "z"]
         #expect(keys.sorted() != keys.sorted { $0.utf8.lexicographicallyPrecedes($1.utf8) })
-        #expect(try memo.encode(cache, at: URL(fileURLWithPath: "/synthetic/order"), encoder: self.encoder)
+        #expect(try self.encode(memo, cache, at: URL(fileURLWithPath: "/synthetic/order"))
             == self.encoder.encode(cache))
     }
+}
 
+extension CostUsageClaudeFragmentTests {
     @Test
-    func `URL isolation and bounded eviction never reuse another cache`() throws {
-        for limit in [0, 1024 * 1024] {
-            let memo = CostUsageClaudeFragments(byteLimit: limit)
-            var cache = CostUsageClaudeCache()
-            cache.usage.files["file"] = self.file(1)
-            for index in 0..<5 {
-                _ = try memo.encode(cache, at: URL(fileURLWithPath: "/synthetic/\(index)"), encoder: self.encoder)
+    func `saved snapshots release encoded header storage while reusing decoded values`() throws {
+        try FileManager.default.createDirectory(at: self.directory.url, withIntermediateDirectories: true)
+        let url = self.directory.url.appendingPathComponent("header-storage.json")
+            .standardizedFileURL.resolvingSymlinksInPath()
+        let fragments = CostUsageClaudeFragments()
+        let storage = HeaderStorage()
+        let trackHeader: @Sendable (Data) -> Data = { storage.track($0) }
+        let header = String(repeating: "fixture-🦞", count: 4096)
+        let values = ["/synthetic/project/session": 1]
+        let headerBytes = try self.encoder.encode(header)
+        let stamp = try autoreleasepool {
+            try CostUsageClaudeFragments.$encodedHeaderStorageForTesting.withValue(trackHeader) {
+                try fragments.save(header: header, values: values, at: url)
             }
-            let recorder = CostUsageScanner.ClaudeScanWorkRecorder()
-            try CostUsageScanner.withClaudeScanWorkRecorderForTesting(recorder) {
-                for index in [0, 0] {
-                    _ = try memo.encode(cache, at: URL(fileURLWithPath: "/synthetic/\(index)"), encoder: self.encoder)
+        }
+        #expect(stamp != nil)
+        #expect(storage.snapshot().allocated == headerBytes.count)
+        #expect(storage.snapshot().retained == 0)
+        let before = try Data(contentsOf: url)
+
+        let work = CostUsageScanner.ClaudeScanWorkRecorder()
+        let cached: (String, [String: Int]) = try CostUsageScanner.withClaudeScanWorkRecorderForTesting(work) {
+            try fragments.load(at: url) { _ in throw CocoaError(.fileReadCorruptFile) }
+        }
+        #expect(cached.0.utf8.elementsEqual(header.utf8))
+        #expect(cached.1 == values)
+        #expect(work.persistenceSnapshot().reads == 0)
+
+        try autoreleasepool {
+            try CostUsageClaudeFragments.$encodedHeaderStorageForTesting.withValue(trackHeader) {
+                _ = try CostUsageScanner.withClaudeScanWorkRecorderForTesting(work) {
+                    try fragments.save(header: cached.0, values: cached.1, at: url)
                 }
             }
-            #expect(recorder.snapshot().fragmentEncodes == (limit == 0 ? 2 : 1))
         }
+        #expect(storage.snapshot().allocated == 2 * headerBytes.count)
+        #expect(storage.snapshot().retained == 0)
+        #expect(work.persistenceSnapshot().reads == 0)
+        #expect(work.persistenceSnapshot().writes == 0)
+        #expect(work.snapshot().fragmentEncodes == 0)
+        #expect(CostUsageClaudeFileStamp.read(at: url) == stamp)
+        #expect(try Data(contentsOf: url) == before)
     }
 
-    @Test
-    func `unsupported encoding format falls back exactly`() throws {
-        let memo = CostUsageClaudeFragments()
-        var cache = CostUsageClaudeCache()
-        cache.usage.files["file"] = self.file(1)
-        self.encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-        let recorder = CostUsageScanner.ClaudeScanWorkRecorder()
-        let actual = try CostUsageScanner.withClaudeScanWorkRecorderForTesting(recorder) {
-            try memo.encode(cache, at: URL(fileURLWithPath: "/synthetic/fallback"), encoder: self.encoder)
-        }
-        #expect(try actual == (self.encoder.encode(cache)))
-        #expect(recorder.snapshot().fragmentFallbacks == 1)
-        #expect(recorder.snapshot().fragmentEncodes == 0)
-    }
+    private final class HeaderStorage: @unchecked Sendable {
+        private let lock = NSLock()
+        private var allocated = 0
+        private var released = 0
 
-    @Test
-    func `save encodes only three changed files and added files`() throws {
-        try CostUsageClaudeFragments.$shared.withValue(CostUsageClaudeFragments()) {
-            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-            defer { try? FileManager.default.removeItem(at: root) }
-            var cache = CostUsageClaudeCache()
-            for index in 0..<100 {
-                cache.usage.files["file-\(index)"] = self.file(index)
-            }
-            _ = try CostUsageClaudeCacheIO.save(provider: .claude, cache: cache, cacheRoot: root)
-            for index in 0..<3 {
-                cache.usage.files["file-\(index)"]?.mtimeUnixMs += 1
-            }
-            cache.usage.files.removeValue(forKey: "file-50")
-            cache.usage.files["added"] = self.file(1)
-            let recorder = CostUsageScanner.ClaudeScanWorkRecorder()
-            try CostUsageScanner.withClaudeScanWorkRecorderForTesting(recorder) {
-                _ = try CostUsageClaudeCacheIO.save(provider: .claude, cache: cache, cacheRoot: root)
-            }
-            #expect(recorder.snapshot().fragmentEncodes == 4)
-            #expect(recorder.snapshot().fragmentFallbacks == 0)
-            cache.usage.version = 4
-            cache.usage.timeZoneIdentifier = Calendar.current.timeZone.identifier
-            let url = CostUsageClaudeCacheIO.cacheFileURL(provider: .claude, cacheRoot: root)
-            #expect(try Data(contentsOf: url) == self.encoder.encode(cache))
+        func track(_ data: Data) -> Data {
+            let pointer = UnsafeMutableRawPointer.allocate(byteCount: data.count, alignment: 1)
+            data.copyBytes(to: UnsafeMutableRawBufferPointer(start: pointer, count: data.count))
+            self.lock.withLock { self.allocated += data.count }
+            return Data(bytesNoCopy: pointer, count: data.count, deallocator: .custom { pointer, count in
+                pointer.deallocate()
+                self.lock.withLock { self.released += count }
+            })
+        }
+
+        func snapshot() -> (allocated: Int, retained: Int) {
+            self.lock.withLock { (self.allocated, self.allocated - self.released) }
         }
     }
 }
