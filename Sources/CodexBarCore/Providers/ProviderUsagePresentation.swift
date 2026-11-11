@@ -201,6 +201,7 @@ public struct ProviderMenuBarWindowContext: Sendable {
 public enum ProviderMenuBarWindowResolution: Sendable {
     case unhandled
     case resolved(RateWindow?)
+    case automaticCandidates([RateWindow])
 }
 
 public enum ProviderPlanUtilizationSeries: Sendable, Hashable {
@@ -288,6 +289,8 @@ public struct ProviderMenuCardPresentation: Sendable {
     public let creditsVisibility: ProviderCreditsVisibility
     public let showsCreditsSection: Bool
     public let providerCostIsRequiredUsage: Bool
+    /// Usage items hidden initially and when restoring provider defaults.
+    public let defaultHiddenUsageItemIDs: [String]
     public let usesProviderCostHistoryAsPrimaryDashboard: Bool
     public let supportsInlineTokenCostDashboard: Bool
     /// Codex and Claude local cost dashboards split spend by live Weekly quota windows.
@@ -319,6 +322,7 @@ public struct ProviderMenuCardPresentation: Sendable {
         showsCreditsSection: Bool = true,
         costVisibilityResolver: @escaping CostVisibilityResolver = { _ in true },
         providerCostIsRequiredUsage: Bool = false,
+        defaultHiddenUsageItemIDs: [String] = [],
         usesProviderCostHistoryAsPrimaryDashboard: Bool = false,
         primaryCostHistoryResolver: @escaping PrimaryCostHistoryResolver = { _, tokenSnapshot in tokenSnapshot },
         supportsInlineTokenCostDashboard: Bool = false,
@@ -344,6 +348,7 @@ public struct ProviderMenuCardPresentation: Sendable {
         self.showsCreditsSection = showsCreditsSection
         self.costVisibilityResolver = costVisibilityResolver
         self.providerCostIsRequiredUsage = providerCostIsRequiredUsage
+        self.defaultHiddenUsageItemIDs = defaultHiddenUsageItemIDs
         self.usesProviderCostHistoryAsPrimaryDashboard = usesProviderCostHistoryAsPrimaryDashboard
         self.primaryCostHistoryResolver = primaryCostHistoryResolver
         self.supportsInlineTokenCostDashboard = supportsInlineTokenCostDashboard
@@ -470,6 +475,9 @@ public struct ProviderUsagePresentation: Sendable {
     public let secondarySemanticWindow: ProviderSemanticWindow
     public let menuBarLayoutPrimaryLabel: String?
     public let menuBarLayoutSecondaryLabel: String?
+    public let menuBarBalanceDetailLabels: [String]?
+    /// Menu bar Balance elements read `ProviderCostSnapshot.balance` as the remaining prepaid amount.
+    public let menuBarBalanceUsesPrepaidCost: Bool
     public let requestedMenuBarLaneOrders: [ProviderMenuBarMetric: [ProviderUsageLane]]
     public let automaticSelectionPrioritizesExhaustedWindow: Bool
     public let switcherUsesAutomaticMenuBarWindow: Bool
@@ -499,6 +507,8 @@ public struct ProviderUsagePresentation: Sendable {
         secondarySemanticWindow: ProviderSemanticWindow = .weekly,
         menuBarLayoutPrimaryLabel: String? = nil,
         menuBarLayoutSecondaryLabel: String? = nil,
+        menuBarBalanceDetailLabels: [String]? = nil,
+        menuBarBalanceUsesPrepaidCost: Bool = false,
         requestedMenuBarLaneOrders: [ProviderMenuBarMetric: [ProviderUsageLane]] = [:],
         automaticSelectionPrioritizesExhaustedWindow: Bool = true,
         switcherUsesAutomaticMenuBarWindow: Bool = false,
@@ -529,6 +539,8 @@ public struct ProviderUsagePresentation: Sendable {
         self.secondarySemanticWindow = secondarySemanticWindow
         self.menuBarLayoutPrimaryLabel = menuBarLayoutPrimaryLabel
         self.menuBarLayoutSecondaryLabel = menuBarLayoutSecondaryLabel
+        self.menuBarBalanceDetailLabels = menuBarBalanceDetailLabels
+        self.menuBarBalanceUsesPrepaidCost = menuBarBalanceUsesPrepaidCost
         self.requestedMenuBarLaneOrders = requestedMenuBarLaneOrders
         self.automaticSelectionPrioritizesExhaustedWindow = automaticSelectionPrioritizesExhaustedWindow
         self.switcherUsesAutomaticMenuBarWindow = switcherUsesAutomaticMenuBarWindow

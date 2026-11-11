@@ -48,6 +48,8 @@ public struct PluginProviderSpec: Sendable {
     public var supportsTokenCost = false
     public var settingsSection: ProviderSettingsSectionRegistration?
     public var pluginResultPolicy = ProviderPluginResultPolicy()
+    public var history: ProviderHistoryCapability = .optIn
+    public var burnDownWidgetSelectable = true
     public var environmentKey: String = ""
     public var environmentAliases: [String] = []
     public var apiKeyDebugLabel: String?
@@ -59,6 +61,7 @@ public struct PluginProviderSpec: Sendable {
     public var menuBarMetrics: ProviderMenuBarMetricCapabilities?
     public var presentation = ProviderUsagePresentation()
     public var aliases: [String] = []
+    public var setup: ProviderSetup = .unknown
     public var timeout = ProviderPluginRuntime.defaultTimeout
     public var scriptSettings: @Sendable (ProviderFetchContext) -> [String: String] = { _ in [:] }
     public var validateContext: ScriptFetchStrategy.ContextValidator = { _ in }
@@ -101,22 +104,30 @@ public struct PluginProviderSpec: Sendable {
             cliName: self.id.rawValue,
             defaultEnabled: false,
             widgetSelectable: false,
+            burnDownWidgetSelectable: self.burnDownWidgetSelectable,
             sharePlanLabels: self.sharePlanLabels,
             debugLogUnavailableMessage: self.debugLogUnavailableMessage,
             debugPane: self.debugPane,
             balanceOnly: self.balanceOnly,
             usesDetailBackedWindow: self.usesDetailBackedWindow,
-            browserCookieOrder: self.webSource?.browserCookieOrder,
+            browserCookieOrder: (self.settingsSection ?? self.webSource?.settingsSection)?.selectedProfileCookieOrder
+                ?? self.webSource?.browserCookieOrder,
             dashboardURL: self.dashboardURL,
             subscriptionDashboardURL: self.subscriptionDashboardURL,
             statusPageURL: self.statusPageURL,
             statusLinkURL: self.statusLinkURL)
-        let fetchPlan: ProviderFetchPlan = fetchPlan ?? ProviderFetchPlan(
-            sourceModes: self.webSource?.sourceModes ?? [.auto, .api],
-            pipeline: ProviderFetchPipeline(resolveStrategies: { context in
-                if let web = self.webSource { return [self.webStrategy(web, context: context)] }
-                return [self.makeStrategy(timeout: self.fetchTimeout(environment: context.env))]
-            }))
+        let fetchPlan: ProviderFetchPlan = fetchPlan ?? {
+            // Strategies own their runtimes; retain the finite API timeout variants across refreshes.
+            let timeouts = self.webSource == nil ? Set([self.timeout] + self.toggles.compactMap(\.enabledTimeout)) : []
+            let strategies = Dictionary(uniqueKeysWithValues: timeouts.map { ($0, self.makeStrategy(timeout: $0)) })
+            return ProviderFetchPlan(
+                sourceModes: self.webSource?.sourceModes ?? [.auto, .api],
+                pipeline: ProviderFetchPipeline(resolveStrategies: { context in
+                    if let web = self.webSource { return [self.webStrategy(web, context: context)] }
+                    let timeout = self.fetchTimeout(environment: context.env)
+                    return [strategies[timeout] ?? self.makeStrategy(timeout: timeout)]
+                }))
+        }()
         let cli = ProviderCLIConfig(
             name: self.id.rawValue,
             aliases: self.aliases,
@@ -143,9 +154,11 @@ public struct PluginProviderSpec: Sendable {
                 progressColorStyle: self.progressColorStyle),
             tokenCost: ProviderTokenCostConfig(
                 supportsTokenCost: self.supportsTokenCost, noDataMessage: { self.noDataMessage }),
+            history: self.history,
             presentation: self.presentation,
             fetchPlan: fetchPlan,
-            cli: cli)
+            cli: cli,
+            setup: self.setup)
     }
 
     func scriptValues(_ context: ProviderFetchContext) -> ScriptFetchStrategy.Values? {

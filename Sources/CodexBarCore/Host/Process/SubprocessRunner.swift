@@ -46,10 +46,13 @@ public enum SubprocessRunner {
         qos: .userInitiated,
         attributes: .concurrent)
 
+    @TaskLocal static var timeoutWillFire: (@Sendable () -> Void)?
+
     /// Thread-safe flag for communicating between concurrent tasks (e.g. timeout → caller).
-    private final class KillFlag: @unchecked Sendable {
+    private final class TimeoutState: @unchecked Sendable {
         private let lock = NSLock()
         private var value = false
+        var timer: (any DispatchSourceTimer)?
 
         func set() {
             self.lock.withLock { self.value = true }
@@ -60,22 +63,7 @@ public enum SubprocessRunner {
         }
     }
 
-    private final class TimeoutTimer: @unchecked Sendable {
-        private let timer: any DispatchSourceTimer
-
-        init(timer: any DispatchSourceTimer) {
-            self.timer = timer
-        }
-
-        func cancel() {
-            self.timer.cancel()
-        }
-    }
-
     private static func timeoutInterval(_ timeout: TimeInterval) -> DispatchTimeInterval {
-        guard timeout.isFinite else {
-            return .seconds(Int.max)
-        }
         let nanoseconds = max(0, timeout * 1_000_000_000).rounded(.towardZero)
         return .nanoseconds(Int(exactly: nanoseconds) ?? Int.max)
     }
@@ -211,6 +199,7 @@ public enum SubprocessRunner {
             stderrPipe.fileHandleForWriting.closeFile()
             throw SubprocessRunnerError.launchFailed(error.localizedDescription)
         }
+        defer { ProcessExitRelease.afterExit(process) }
         stdoutCapture.start()
         stderrCapture.start()
 
@@ -218,38 +207,34 @@ public enum SubprocessRunner {
         let processGroup: pid_t? = setpgid(pid, pid) == 0 || getpgid(pid) == pid ? pid : nil
         defer { ownership?.reap(processGroup: processGroup) }
 
-        let exitCodeTask = Task<Int32, Never> {
-            await termination.wait()
+        let killedByTimeout = TimeoutState()
+        if timeout.isFinite {
+            let timeoutTimer = DispatchSource.makeTimerSource(queue: self.timeoutQueue)
+            timeoutTimer.schedule(deadline: .now() + self.timeoutInterval(timeout))
+            let timeoutWillFire = self.timeoutWillFire
+            timeoutTimer.setEventHandler {
+                timeoutWillFire?()
+                guard process.isRunning else { return }
+                killedByTimeout.set()
+                self.terminateProcess(process, processGroup: processGroup)
+            }
+            killedByTimeout.timer = timeoutTimer
+            timeoutTimer.resume()
         }
 
-        let killedByTimeout = KillFlag()
-        let timeoutTimerBox: TimeoutTimer? = if timeout.isFinite {
-            {
-                let timeoutTimer = DispatchSource.makeTimerSource(queue: self.timeoutQueue)
-                timeoutTimer.schedule(deadline: .now() + self.timeoutInterval(timeout))
-                timeoutTimer.setEventHandler {
-                    guard process.isRunning else { return }
-                    killedByTimeout.set()
-                    self.terminateProcess(process, processGroup: processGroup)
-                }
-                timeoutTimer.resume()
-                return TimeoutTimer(timer: timeoutTimer)
-            }()
-        } else {
-            nil
-        }
+        defer { killedByTimeout.timer?.setEventHandler(handler: nil) }
 
         do {
             let exitCode = try await withTaskCancellationHandler {
                 try Task.checkCancellation()
-                let code = await exitCodeTask.value
+                let code = await termination.wait()
                 try Task.checkCancellation()
                 return code
             } onCancel: {
-                timeoutTimerBox?.cancel()
+                killedByTimeout.timer?.cancel()
                 self.terminateProcess(process, processGroup: processGroup)
             }
-            timeoutTimerBox?.cancel()
+            killedByTimeout.timer?.cancel()
 
             let duration = Date().timeIntervalSince(start)
             // Race guard: the timeout timer may kill the process just before the
@@ -296,7 +281,6 @@ public enum SubprocessRunner {
                 metadata: logMetadata(duration: duration))
             // Safety net: ensure the process is dead (may already be killed by timeout timer).
             self.terminateProcess(process, processGroup: processGroup)
-            exitCodeTask.cancel()
             stdoutCapture.stop()
             stderrCapture.stop()
             throw error

@@ -14,6 +14,8 @@ struct SpawnedProcessGroupTests {
         func makePipe() throws -> (read: Int32, write: Int32) {
             var descriptors = [Int32](repeating: -1, count: 2)
             try #require(pipe(&descriptors) == 0)
+            // Concurrent test children must not keep this fixture's writer alive.
+            try #require(fcntl(descriptors[1], F_SETFD, FD_CLOEXEC) == 0)
             return (descriptors[0], descriptors[1])
         }
 
@@ -88,17 +90,22 @@ struct SpawnedProcessGroupTests {
         let readDescriptor = descriptors[0]
         let leasedWriteDescriptor = descriptors[1]
         defer { _ = close(readDescriptor) }
+        try #require(fcntl(leasedWriteDescriptor, F_SETFD, FD_CLOEXEC) == 0)
 
-        let start = Date()
+        let now = DispatchTime(uptimeNanoseconds: 1_000_000_000)
         let result = SpawnedProcessGroup._test_outputHolderCleanupLeaseExpiry(
             ownedFileDescriptor: leasedWriteDescriptor,
             maxLifetime: 0.05,
-            waitTimeout: 0.5)
-        let elapsed = Date().timeIntervalSince(start)
+            waitTimeout: 30,
+            now: now,
+            schedule: { deadline, expire in
+                #expect(deadline.uptimeNanoseconds == now.uptimeNanoseconds + 50_000_000)
+                #expect(fcntl(leasedWriteDescriptor, F_GETFD) >= 0)
+                expire()
+            })
 
         #expect(result.completed)
         #expect(!result.active)
-        #expect(elapsed < 0.5)
         let flags = fcntl(readDescriptor, F_GETFL)
         #expect(flags >= 0)
         #expect(fcntl(readDescriptor, F_SETFL, flags | O_NONBLOCK) == 0)
@@ -286,19 +293,19 @@ struct SpawnedProcessGroupTests {
         let script = """
         import subprocess
         import sys
-        import time
+        import signal
 
         child = subprocess.Popen(
             [
                 sys.executable,
                 "-c",
-                "import os,signal,sys,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-                "open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(30)",
+                "import os,signal,sys; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "open(sys.argv[1], 'w').write(str(os.getpid())); \(KiroProcessTestSupport.pythonOwnerBoundedHold())",
                 sys.argv[1],
             ],
             start_new_session=True,
         )
-        time.sleep(30)
+        signal.pause()
         """
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -309,28 +316,27 @@ struct SpawnedProcessGroupTests {
             stdoutPipe: stdoutPipe,
             stderrPipe: stderrPipe)
 
-        var childPID: pid_t?
-        for _ in 0..<500 {
-            if let text = try? String(contentsOf: childPIDFile, encoding: .utf8),
-               let parsedPID = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines))
-            {
-                childPID = parsedPID
-                break
-            }
-            try await Task.sleep(for: .milliseconds(20))
-        }
-        guard let escapedPID = childPID else {
+        let escapedPID: pid_t
+        do {
+            escapedPID = try await KiroProcessTestSupport.waitForPID(in: childPIDFile)
+        } catch {
             await process.terminate(grace: 0)
-            Issue.record("Timed out waiting for escaped child PID")
-            return
+            throw error
         }
         defer { _ = kill(escapedPID, SIGKILL) }
 
-        let start = Date()
-        await process.terminate(grace: 0.3)
-        let elapsed = Date().timeIntervalSince(start)
+        let ticks = LockIsolated(0)
+        await process.terminate(
+            grace: 0.3,
+            now: { Date(timeIntervalSinceReferenceDate: Double(ticks.value) / 10) },
+            sleep: { duration in
+                #expect(duration == .milliseconds(20))
+                #expect(kill(escapedPID, 0) == 0, "SIGKILL must not precede the grace deadline")
+                ticks.setValue(ticks.value + 1)
+                await Task.yield()
+            })
 
-        #expect(elapsed >= 0.25, "Termination should honor the grace period before SIGKILL")
+        #expect(ticks.value == 3)
         #expect(kill(escapedPID, 0) == -1)
     }
 
@@ -481,6 +487,7 @@ struct SpawnedProcessGroupTests {
 
         let script = """
         import os
+        import select
         import signal
         import sys
         import time
@@ -501,13 +508,16 @@ struct SpawnedProcessGroupTests {
                     os.write(writer, b"1")
                     os.close(writer)
                     counter = 1
-                    while True:
+                    deadline = time.monotonic() + \(KiroProcessTestSupport.fixtureHoldLimit)
+                    while time.monotonic() < deadline:
                         counter += 1
                         heartbeat.seek(0)
                         heartbeat.write(str(counter))
                         heartbeat.truncate()
                         heartbeat.flush()
-                        time.sleep(0.02)
+                        if \(KiroProcessTestSupport.pythonOwnerExitWait(timeout: 0.02)):
+                            os._exit(0)
+                    os._exit(0)
             os.close(writer)
             os.read(reader, 1)
             os.close(reader)
@@ -620,6 +630,7 @@ struct SpawnedProcessGroupTests {
 
         let script = """
         import os
+        import select
         import signal
         import sys
         import time
@@ -633,13 +644,15 @@ struct SpawnedProcessGroupTests {
                 handle.write(str(os.getpid()))
             counter = 0
             with open(sys.argv[2], "w") as heartbeat:
-                while True:
+                deadline = time.monotonic() + \(KiroProcessTestSupport.fixtureHoldLimit)
+                while time.monotonic() < deadline:
                     counter += 1
                     heartbeat.seek(0)
                     heartbeat.write(str(counter))
                     heartbeat.truncate()
                     heartbeat.flush()
-                    time.sleep(0.02)
+                    if \(KiroProcessTestSupport.pythonOwnerExitWait(timeout: 0.02)):
+                        os._exit(0)
             os._exit(0)
         """
         let stdoutPipe = Pipe()
@@ -706,6 +719,7 @@ struct SpawnedProcessGroupTests {
 
         let script = """
         import os
+        import select
         import signal
         import sys
         import time
@@ -729,13 +743,16 @@ struct SpawnedProcessGroupTests {
                         os.write(writer, b"1")
                         os.close(writer)
                         counter = 1
-                        while True:
+                        deadline = time.monotonic() + \(KiroProcessTestSupport.fixtureHoldLimit)
+                        while time.monotonic() < deadline:
                             counter += 1
                             heartbeat.seek(0)
                             heartbeat.write(str(counter))
                             heartbeat.truncate()
                             heartbeat.flush()
-                            time.sleep(0.02)
+                            if \(KiroProcessTestSupport.pythonOwnerExitWait(timeout: 0.02)):
+                                os._exit(0)
+                        os._exit(0)
                 with open(sys.argv[2], "w") as handle:
                     handle.write(str(child))
                 os.close(writer)

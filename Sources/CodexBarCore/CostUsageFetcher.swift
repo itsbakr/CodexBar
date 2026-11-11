@@ -57,6 +57,8 @@ public struct CostUsageFetcher: Sendable {
         package let completedFiles: Int
         package let totalFiles: Int
         package let staleSnapshotUpdatedAt: Date?
+        package var completionIsConfirmed: Bool
+        package var yieldedBeforeFileAttempt: Bool
 
         var historyCoverageIsEstablished: Bool {
             !self.pending && self.progressKey != "scope-mismatch"
@@ -69,7 +71,9 @@ public struct CostUsageFetcher: Sendable {
             totalBytes: Int64 = 0,
             completedFiles: Int = 0,
             totalFiles: Int = 0,
-            staleSnapshotUpdatedAt: Date? = nil)
+            staleSnapshotUpdatedAt: Date? = nil,
+            completionIsConfirmed: Bool = false,
+            yieldedBeforeFileAttempt: Bool = false)
         {
             self.pending = pending
             self.progressKey = progressKey
@@ -78,6 +82,8 @@ public struct CostUsageFetcher: Sendable {
             self.completedFiles = max(0, completedFiles)
             self.totalFiles = max(0, totalFiles)
             self.staleSnapshotUpdatedAt = staleSnapshotUpdatedAt
+            self.completionIsConfirmed = completionIsConfirmed
+            self.yieldedBeforeFileAttempt = yieldedBeforeFileAttempt
         }
     }
 
@@ -123,15 +129,21 @@ public struct CostUsageFetcher: Sendable {
         codexHomePath: String? = nil,
         historyDays: Int = 30,
         includePiSessions: Bool = true,
+        includeOpenCodeLocalHistory: Bool = false,
         calendar: Calendar? = nil,
+        requireCompleteHistory: Bool = false,
         environment: [String: String] = ProcessInfo.processInfo.environment) async -> CachedCodexTokenSnapshotResult?
     {
         await Self.loadCachedCodexTokenSnapshotResult(
             now: now,
             codexHomePath: codexHomePath,
             historyDays: historyDays,
+            allowScopedCodexHome: requireCompleteHistory,
             includePiSessions: includePiSessions,
-            scannerOptions: self.scannerOptions(calendar: calendar),
+            requireCompleteHistory: requireCompleteHistory,
+            scannerOptions: self.scannerOptions(
+                calendar: calendar,
+                includeOpenCodeLocalHistory: includeOpenCodeLocalHistory),
             environment: environment)
     }
 
@@ -151,25 +163,6 @@ public struct CostUsageFetcher: Sendable {
             includePiSessions: includePiSessions,
             includeProjectAndSessionBreakdowns: includeProjectAndSessionBreakdowns,
             scannerOptions: self.scannerOptions(calendar: calendar))
-    }
-
-    package func loadCompletedCodexTokenSnapshotResult(
-        now: Date = Date(),
-        codexHomePath: String? = nil,
-        historyDays: Int = 30,
-        includePiSessions: Bool = true,
-        calendar: Calendar? = nil,
-        environment: [String: String] = ProcessInfo.processInfo.environment) async -> CachedCodexTokenSnapshotResult?
-    {
-        await Self.loadCachedCodexTokenSnapshotResult(
-            now: now,
-            codexHomePath: codexHomePath,
-            historyDays: historyDays,
-            allowScopedCodexHome: true,
-            includePiSessions: includePiSessions,
-            requireCompleteHistory: true,
-            scannerOptions: self.scannerOptions(calendar: calendar),
-            environment: environment)
     }
 
     public func loadCachedCodexLocalProjectUsageSnapshot(
@@ -214,6 +207,7 @@ public struct CostUsageFetcher: Sendable {
     public func loadTokenSnapshot(
         provider: UsageProvider,
         environment: [String: String] = ProcessInfo.processInfo.environment,
+        antigravityAdditionalProfileHomes: [String] = [],
         now: Date = Date(),
         forceRefresh: Bool = false,
         allowVertexClaudeFallback: Bool = false,
@@ -231,6 +225,7 @@ public struct CostUsageFetcher: Sendable {
         try await Self.loadTokenSnapshot(
             provider: provider,
             environment: environment,
+            antigravityAdditionalProfileHomes: antigravityAdditionalProfileHomes,
             now: now,
             forceRefresh: forceRefresh,
             allowVertexClaudeFallback: allowVertexClaudeFallback,
@@ -248,7 +243,9 @@ public struct CostUsageFetcher: Sendable {
 
     package func loadTokenResult(
         provider: UsageProvider,
+        claudeConfigDirectory: String? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
+        antigravityAdditionalProfileHomes: [String] = [],
         now: Date = Date(),
         forceRefresh: Bool = false,
         allowVertexClaudeFallback: Bool = false,
@@ -258,15 +255,28 @@ public struct CostUsageFetcher: Sendable {
         allowPricingRefresh: Bool = true,
         refreshPricingInBackground: Bool = true,
         includePiSessions: Bool = true,
+        includeOpenCodeLocalHistory: Bool = false,
         piWorkingDirectories: [URL] = [],
         piSessionProcessContexts: [PiSessionProcessContext] = [],
         bypassScannerDebounce: Bool,
         calendar: Calendar? = nil,
         reportContext: CostUsageReportContext = .regular) async throws -> CostUsageTokenResult
     {
-        try await Self.loadTokenResult(
+        var options = self.scannerOptions(calendar: calendar, includeOpenCodeLocalHistory: includeOpenCodeLocalHistory)
+        // Provider-specific by design: explicit account roots never include ambient or swap history.
+        if provider == .claude, let claudeConfigDirectory {
+            let roots = ClaudeConfigPaths.costProjectsRoots(
+                accountConfigDirectory: claudeConfigDirectory, environment: environment)
+            guard let root = roots.first, FileManager.default.isReadableFile(atPath: root.path) else {
+                throw CocoaError(.fileReadNoSuchFile)
+            }
+            options = options ?? CostUsageScanner.Options()
+            options?.claudeProjectsRoots = roots
+        }
+        return try await Self.loadTokenResult(
             provider: provider,
             environment: environment,
+            antigravityAdditionalProfileHomes: antigravityAdditionalProfileHomes,
             now: now,
             forceRefresh: forceRefresh,
             allowVertexClaudeFallback: allowVertexClaudeFallback,
@@ -279,7 +289,7 @@ public struct CostUsageFetcher: Sendable {
             bypassScannerDebounce: bypassScannerDebounce,
             piWorkingDirectories: piWorkingDirectories,
             piSessionProcessContexts: piSessionProcessContexts,
-            scannerOptions: self.scannerOptions(calendar: calendar),
+            scannerOptions: options,
             reportContext: reportContext)
     }
 
@@ -308,9 +318,12 @@ public struct CostUsageFetcher: Sendable {
             refreshPricingInBackground: refreshPricingInBackground)
     }
 
-    private func scannerOptions(calendar: Calendar?) -> CostUsageScanner.Options? {
-        guard calendar != nil || self.scannerOptions != nil else { return self.scannerOptions }
+    private func scannerOptions(
+        calendar: Calendar?, includeOpenCodeLocalHistory: Bool = false) -> CostUsageScanner.Options?
+    {
+        guard calendar != nil || self.scannerOptions != nil || includeOpenCodeLocalHistory else { return nil }
         var options = self.scannerOptions ?? CostUsageScanner.Options()
+        options.includeOpenCodeLocalHistory = includeOpenCodeLocalHistory
         if let calendar {
             options.calendar = calendar
         }
@@ -319,16 +332,21 @@ public struct CostUsageFetcher: Sendable {
 
     package func codexScanCatchUpStatus(
         codexHomePath: String? = nil,
-        calendar: Calendar? = nil) async -> CodexScanCatchUpStatus
+        calendar: Calendar? = nil,
+        historyDays: Int? = nil,
+        now: Date = Date(),
+        includeOpenCodeLocalHistory: Bool = false,
+        environment: [String: String] = ProcessInfo.processInfo.environment) async -> CodexScanCatchUpStatus
     {
         // Provider-specific by design: Codex exposes bounded background catch-up for its incremental JSONL scanner.
         let options = Self.resolvedScannerOptions(
-            self.scannerOptions(calendar: calendar),
+            self.scannerOptions(calendar: calendar, includeOpenCodeLocalHistory: includeOpenCodeLocalHistory),
             provider: .codex,
             codexHomePath: codexHomePath)
         return await (try? CostUsageScanExecutor.run { checkCancellation in
             try checkCancellation()
-            return Self.codexScanCatchUpStatus(options: options)
+            return Self.codexScanCatchUpStatus(
+                options: options, historyDays: historyDays, now: now, environment: environment)
         }) ?? CodexScanCatchUpStatus(pending: false, progressKey: "unavailable")
     }
 
@@ -337,10 +355,13 @@ public struct CostUsageFetcher: Sendable {
         codexHomePath: String? = nil,
         historyDays: Int = 30,
         scanDurationPerRefresh: TimeInterval? = nil,
-        calendar: Calendar? = nil) async throws -> CostUsageScanExecutor.TimedResult<CodexScanCatchUpStatus>
+        calendar: Calendar? = nil,
+        includeOpenCodeLocalHistory: Bool = false,
+        environment: [String: String] = ProcessInfo.processInfo.environment)
+        async throws -> CostUsageScanExecutor.TimedResult<CodexScanCatchUpStatus>
     {
         var options = Self.resolvedScannerOptions(
-            self.scannerOptions(calendar: calendar),
+            self.scannerOptions(calendar: calendar, includeOpenCodeLocalHistory: includeOpenCodeLocalHistory),
             provider: .codex, // Provider-specific by design: this catch-up operation is owned by Codex's ledger.
             codexHomePath: codexHomePath)
         options.forceRescan = false
@@ -351,30 +372,58 @@ public struct CostUsageFetcher: Sendable {
         let since = CostReportingPeriod.rolling(days: clampedHistoryDays)
             .bounds(now: now, calendar: options.calendar).lowerBound
         let scanOptions = options
+        let range = CostUsageScanner.CostUsageDayRange(since: since, until: now, calendar: options.calendar)
+        let scope = OpenCodeLocalHistoryAdapter.readScope(options: options, environment: environment, range: range)
+        let sourceStart = Date()
+        let sourceRefreshSucceeded = try await OpenCodeLocalHistoryAdapter.refresh(
+            scope: scope, cacheRoot: options.cacheRoot, calendar: options.calendar)
+        let sourceDuration = scope == nil ? 0 : Date().timeIntervalSince(sourceStart)
         // Provider-specific by design: this catch-up step advances only the Codex incremental scanner.
-        return try await CostUsageScanExecutor.runTimed { checkCancellation in
+        let result = try await CostUsageScanExecutor.runTimed { checkCancellation in
+            var options = scanOptions
+            let yieldedBeforeAttempt = CostUsageScanExecutor.LockedState(false)
+            options.codexScanDidYieldBeforeFileAttempt = { value in yieldedBeforeAttempt.withLock { $0 = value } }
             _ = try CostUsageScanner.loadDailyReportCancellable(
                 provider: .codex,
                 since: since,
                 until: now,
                 now: now,
-                options: scanOptions,
+                options: options,
                 checkCancellation: checkCancellation)
             try checkCancellation()
-            return Self.codexScanCatchUpStatus(options: scanOptions)
+            var status = Self.codexScanCatchUpStatus(
+                options: options, historyDays: historyDays, now: now, environment: environment)
+            status.completionIsConfirmed = status.completionIsConfirmed && sourceRefreshSucceeded
+            status.yieldedBeforeFileAttempt = yieldedBeforeAttempt.withLock { $0 }
+            return status
         }
+        return .init(value: result.value, activeDuration: result.activeDuration + sourceDuration)
     }
 
     private static func codexScanCatchUpStatus(
-        options: CostUsageScanner.Options) -> CodexScanCatchUpStatus
+        options: CostUsageScanner.Options,
+        historyDays: Int? = nil,
+        now: Date = Date(),
+        environment: [String: String] = ProcessInfo.processInfo.environment) -> CodexScanCatchUpStatus
     {
         let roots = CostUsageScanner.codexSessionsRoots(options: options)
         let rootsFingerprint = CostUsageScanner.codexRootsFingerprint(options: options)
+        let requiredRange = historyDays.map { days in
+            CostUsageScanner.CostUsageDayRange(
+                since: CostReportingPeriod.rolling(days: max(1, days))
+                    .bounds(now: now, calendar: options.calendar).lowerBound,
+                until: now,
+                calendar: options.calendar)
+        }
+        let sourceScope = OpenCodeLocalHistoryAdapter.readScope(
+            options: options, environment: environment, range: requiredRange)
         let view = CostUsageStoreAccess.readView(
             cacheRoot: options.cacheRoot,
+            home: CodexHomeCostStoreScope.key(options: options),
             calendar: options.calendar,
-            purpose: .status)
-        return view.catchUpStatus(roots: roots, rootsFingerprint: rootsFingerprint)
+            purpose: .status,
+            sourceScope: sourceScope)
+        return view.catchUpStatus(roots: roots, rootsFingerprint: rootsFingerprint, requiredRange: requiredRange)
     }
 
     private static let establishedEmptyCodexDailyReport = CostUsageDailyReport(data: [], summary: nil)
@@ -399,6 +448,7 @@ public struct CostUsageFetcher: Sendable {
     static func loadTokenSnapshot(
         provider: UsageProvider,
         environment: [String: String] = ProcessInfo.processInfo.environment,
+        antigravityAdditionalProfileHomes: [String] = [],
         now: Date = Date(),
         forceRefresh: Bool = false,
         allowVertexClaudeFallback: Bool = false,
@@ -420,6 +470,7 @@ public struct CostUsageFetcher: Sendable {
         try await self.loadTokenResult(
             provider: provider,
             environment: environment,
+            antigravityAdditionalProfileHomes: antigravityAdditionalProfileHomes,
             now: now,
             forceRefresh: forceRefresh,
             allowVertexClaudeFallback: allowVertexClaudeFallback,
@@ -442,6 +493,7 @@ public struct CostUsageFetcher: Sendable {
     static func loadTokenResult(
         provider: UsageProvider,
         environment: [String: String] = ProcessInfo.processInfo.environment,
+        antigravityAdditionalProfileHomes: [String] = [],
         now: Date = Date(),
         forceRefresh: Bool = false,
         allowVertexClaudeFallback: Bool = false,
@@ -478,11 +530,12 @@ public struct CostUsageFetcher: Sendable {
                 let daily = try await Self.loadBedrockDailyReport(
                     environment: environment,
                     since: since,
-                    until: now)
+                    until: now,
+                    forceRefresh: forceRefresh)
                 remoteSnapshot = Self.tokenSnapshot(
                     from: CostUsageDailyReport(
                         data: CostReportingPeriod.rolling(days: clampedHistoryDays)
-                            .entries(daily.data, now: now, calendar: calendar),
+                            .entries(daily.report.data, now: now, calendar: calendar),
                         summary: nil),
                     now: now,
                     historyDays: clampedHistoryDays,
@@ -491,7 +544,8 @@ public struct CostUsageFetcher: Sendable {
                     historyCoverageIsEstablished: CostUsageLocalDay.key(from: now, calendar: calendar)
                         <= CostUsageLocalDay.key(
                             from: now, calendar: CostUsageBucketTimeZone.calendar(identifier: "UTC")),
-                    costProvenance: .vendorMetered)
+                    costProvenance: .vendorMetered,
+                    updatedAt: daily.updatedAt)
             }
 
             #if os(macOS)
@@ -506,7 +560,8 @@ public struct CostUsageFetcher: Sendable {
             }
             #endif
         } catch {
-            if provider != .cursor {
+            // Local CSVs have no account identity and cannot replace an explicitly selected credential.
+            if provider != .cursor || cursorCookieHeaderOverride != nil {
                 throw error
             }
             remoteError = error
@@ -546,7 +601,7 @@ public struct CostUsageFetcher: Sendable {
                     inBackground: refreshPricingInBackground || !forceRefresh),
                 client: modelsDevClient)
             if let local = try await self.loadPricedAntigravityLocalSnapshot(
-                environment: environment,
+                context: .init(environment: environment, additionalProfileHomes: antigravityAdditionalProfileHomes),
                 now: now,
                 historyDays: clampedHistoryDays,
                 calendar: fallbackCalendar,
@@ -561,6 +616,25 @@ public struct CostUsageFetcher: Sendable {
                 now: now,
                 historyDays: clampedHistoryDays,
                 calendar: fallbackCalendar))
+        }
+        // OpenCode Go shares the app's device-local reader and recorded-cost projection.
+        if provider == .opencodego {
+            let home = environment["HOME"].map { URL(fileURLWithPath: $0, isDirectory: true) }
+                ?? FileManager.default.homeDirectoryForCurrentUser
+            return try await CostUsageScanExecutor.run { _ in
+                do {
+                    let usage = try OpenCodeGoLocalUsageReader(homeDirectory: home).fetch(
+                        now: now, historyDays: clampedHistoryDays, calendar: fallbackCalendar)
+                    return CostUsageTokenResult(snapshot: usage.toCostUsageTokenSnapshot(
+                        historyDays: clampedHistoryDays, calendar: fallbackCalendar))
+                } catch OpenCodeGoLocalUsageError.notDetected {
+                    // Remote quota tracking does not require a local OpenCode install.
+                    return CostUsageTokenResult(snapshot: Self.unavailableLocalSnapshot(
+                        now: now,
+                        historyDays: clampedHistoryDays,
+                        calendar: fallbackCalendar))
+                }
+            }
         }
         // Provider-specific by design: Muse local history has token evidence but no established dollar rates.
         if provider == .muse {
@@ -779,6 +853,7 @@ public struct CostUsageFetcher: Sendable {
             costProvenance: .listPriceEstimate,
             projects: scanResult.inclusive.projects,
             sessions: scanResult.inclusive.sessions,
+            detailsAreComplete: scanResult.inclusive.detailsAreComplete,
             updatedAt: scanResult.inclusive.staleSnapshotUpdatedAt)
         // Provider-specific by design: native projections exist for the two transcript families.
         let accounting: PiSnapshotAccounting? = if let scope = scanResult.piScope {
@@ -791,6 +866,7 @@ public struct CostUsageFetcher: Sendable {
                 costProvenance: .listPriceEstimate,
                 projects: scanResult.native.projects,
                 sessions: scanResult.native.sessions,
+                detailsAreComplete: scanResult.native.detailsAreComplete,
                 updatedAt: scanResult.native.staleSnapshotUpdatedAt))
         } else if provider == .codex || provider == .claude {
             .nativeOnly
@@ -806,6 +882,7 @@ public struct CostUsageFetcher: Sendable {
         let sessions: [CostUsageSessionBreakdown]
         let staleSnapshotUpdatedAt: Date?
         let historyCoverageIsEstablished: Bool
+        let detailsAreComplete: Bool
     }
 
     private struct LocalTokenScanResult: Sendable {
@@ -844,6 +921,16 @@ public struct CostUsageFetcher: Sendable {
         options: LocalTokenScanOptions) async throws -> LocalTokenScanResult
     {
         try Task.checkCancellation()
+        let range = CostUsageScanner.CostUsageDayRange(since: since, until: now, calendar: options.scanOptions.calendar)
+        // Provider-specific by design: OpenCode is an opt-in source of the ambient Codex ledger only.
+        let sourceScope = provider == .codex ? OpenCodeLocalHistoryAdapter.readScope(
+            options: options.scanOptions,
+            environment: options.environment,
+            reportContext: options.reportContext,
+            range: range) : nil
+        let sourceRefreshSucceeded = try await OpenCodeLocalHistoryAdapter.refresh(
+            scope: sourceScope, cacheRoot: options.scanOptions.cacheRoot, calendar: options.scanOptions.calendar)
+
         // Provider-specific by design: Codex owns project/session attribution and optional Pi merge state, while
         // Claude/Vertex share the transcript scanner with mutually exclusive filters.
         // These synchronous scans can run for minutes on large archives. The dedicated queue keeps
@@ -881,30 +968,31 @@ public struct CostUsageFetcher: Sendable {
             var sessions: [CostUsageSessionBreakdown] = []
             var piScanIsComplete = true
             var staleSnapshotUpdatedAt: Date?
+            var detailsAreComplete = true
             var historyCoverageIsEstablished = provider != .codex
             if provider == .codex {
                 let roots = CostUsageScanner.codexSessionsRoots(options: options.scanOptions)
                 let rootsFingerprint = CostUsageScanner.codexRootsFingerprint(options: options.scanOptions)
                 let range = CostUsageScanner.CostUsageDayRange(
                     since: since, until: now, calendar: options.scanOptions.calendar)
-                let view = Self.codexReportView(options: options.scanOptions, range: range)
+                let view = Self.codexReportView(options: options.scanOptions, range: range, sourceScope: sourceScope)
                 historyCoverageIsEstablished = view.historyCoverageIsEstablished(
                     range: range,
-                    rootsFingerprint: rootsFingerprint)
+                    rootsFingerprint: rootsFingerprint) && sourceRefreshSucceeded
+                detailsAreComplete = historyCoverageIsEstablished &&
+                    (view.days.isEmpty || view.projectMetadataVersion == CostUsageScanner.codexProjectMetadataVersion)
                 if !historyCoverageIsEstablished,
                    let previous = view.previousReport(range: range, rootsFingerprint: rootsFingerprint)
                 {
                     staleSnapshotUpdatedAt = previous.updatedAt
+                    daily = view.mergingSource(into: previous.report, range: range)
                 } else {
-                    daily = view.dailyReport(range: range, cacheRoot: options.scanOptions.cacheRoot)
-                    projects = view.projects(
-                        range: range,
-                        cacheRoot: options.scanOptions.cacheRoot)
-                    sessions = Self.codexSessionsWithThreadTitles(
-                        view.sessions(
-                            range: range,
-                            cacheRoot: options.scanOptions.cacheRoot,
-                            roots: roots),
+                    let reports = view.reports(range: range, cacheRoot: options.scanOptions.cacheRoot, roots: roots)
+                    daily = reports.daily
+                    (projects, sessions) = Self.codexBreakdownsWithMetadata(
+                        reports.sessions,
+                        projects: reports.projects,
+                        projectSessionIDs: view.projectSessionIDs(range: range),
                         sessionsRoot: roots.first,
                         environment: options.environment)
                 }
@@ -914,7 +1002,8 @@ public struct CostUsageFetcher: Sendable {
                 projects: projects,
                 sessions: sessions,
                 staleSnapshotUpdatedAt: staleSnapshotUpdatedAt,
-                historyCoverageIsEstablished: historyCoverageIsEstablished)
+                historyCoverageIsEstablished: historyCoverageIsEstablished,
+                detailsAreComplete: detailsAreComplete)
             var piScope: String?
             if options.includePiSessions,
                provider == .claude || (provider == .codex && options.shouldMergePiUsage)
@@ -958,70 +1047,126 @@ public struct CostUsageFetcher: Sendable {
                     projects: projects,
                     sessions: sessions,
                     staleSnapshotUpdatedAt: staleSnapshotUpdatedAt,
-                    historyCoverageIsEstablished: native.historyCoverageIsEstablished && piScanIsComplete),
+                    historyCoverageIsEstablished: native.historyCoverageIsEstablished && piScanIsComplete,
+                    detailsAreComplete: native.detailsAreComplete && piScanIsComplete && piScope == nil),
                 native: native,
                 piScope: piScope)
         }
     }
 
-    /// Codex keeps thread names outside the rollout files, so overlay them after the cost scan.
-    static func codexSessionsWithThreadTitles(
+    /// Refresh presentation metadata once per database, without changing the cached accounting.
+    static func codexBreakdownsWithMetadata(
         _ sessions: [CostUsageSessionBreakdown],
+        projects: [CostUsageProjectBreakdown] = [],
+        projectSessionIDs: [String: Set<String>] = [:],
         sessionsRoot: URL?,
         environment: [String: String] = ProcessInfo.processInfo.environment,
-        fileManager: FileManager = .default) -> [CostUsageSessionBreakdown]
+        fileManager: FileManager = .default,
+        projectMetadataLookup: (URL, Set<String>, Set<String>) -> CodexThreadMetadataReader.ProjectMetadata = {
+            CodexThreadMetadataReader(databaseURL: $0).projectMetadata(for: $1, sessionIDs: $2)
+        }) -> (projects: [CostUsageProjectBreakdown], sessions: [CostUsageSessionBreakdown])
     {
-        guard !sessions.isEmpty,
-              let sessionsRoot,
-              sessionsRoot.lastPathComponent == "sessions"
-        else {
-            return sessions
-        }
+        var result = (projects: projects, sessions: sessions)
+        guard !projects.isEmpty || !sessions.isEmpty,
+              let sessionsRoot, sessionsRoot.lastPathComponent == "sessions"
+        else { return result }
         let home = sessionsRoot.deletingLastPathComponent()
-        let indexedNames = CodexThreadMetadataReader.indexedThreadNames(
-            codexHomeDirectory: home, sessionIDs: Set(sessions.map(\.sessionID)))
+        let projectlessMetadata = CodexProjectlessWorkspaceMetadata.load(codexHomeDirectory: home)
         var databasesByWorkingDirectory: [String?: URL] = [:]
         var databasesBySQLiteHome: [URL: URL] = [:]
-        let groups = Dictionary(grouping: sessions) { session in
-            if let database = databasesByWorkingDirectory[session.workingDirectory] { return database }
+        func database(for workingDirectory: String?) -> URL {
+            if let database = databasesByWorkingDirectory[workingDirectory] { return database }
             let sqliteHome = CodexThreadMetadataReader.sqliteHomeDirectory(
                 codexHomeDirectory: home,
                 environment: environment,
-                resolvedWorkingDirectory: session.workingDirectory.map {
-                    URL(fileURLWithPath: $0, isDirectory: true)
-                })
+                resolvedWorkingDirectory: workingDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) })
             let database = databasesBySQLiteHome[sqliteHome] ?? CodexThreadMetadataReader.databaseURL(
                 sqliteHomeDirectory: sqliteHome, fileManager: fileManager)
             databasesBySQLiteHome[sqliteHome] = database
-            databasesByWorkingDirectory[session.workingDirectory] = database
+            databasesByWorkingDirectory[workingDirectory] = database
             return database
         }
-        var metadata: [String: CodexThreadMetadata] = [:]
-        for (database, sessions) in groups {
-            metadata.merge(CodexThreadMetadataReader(databaseURL: database).metadata(
-                for: Set(sessions.map(\.sessionID)), indexedNames: indexedNames)) { _, latest in latest }
+        var pathsByDatabase: [URL: Set<String>] = [:]
+        var memberIDsByDatabase: [URL: Set<String>] = [:]
+        let projectLookups = projects.map { project in
+            // A canonical project may combine worktrees with different relative SQLite homes.
+            project.sources.compactMap { source -> (database: URL, path: String)? in
+                guard let path = source.path else { return nil }
+                let database = database(for: path)
+                pathsByDatabase[database, default: []].insert(path)
+                memberIDsByDatabase[database, default: []].formUnion(projectSessionIDs[path] ?? [])
+                return (database, path)
+            }
         }
-        return sessions.map { session in
-            guard let title = metadata[session.sessionID]?.title else { return session }
-            return session.withTitle(title)
+        let sessionGroups = Dictionary(grouping: sessions.indices) { index in
+            let session = sessions[index]
+            let database = database(for: session.workingDirectory)
+            pathsByDatabase[database, default: []].formUnion(session.workingDirectory.map { [$0] } ?? [])
+            memberIDsByDatabase[database, default: []].insert(session.sessionID)
+            return database
         }
+        let metadataByDatabase = Dictionary(uniqueKeysWithValues: pathsByDatabase.map { database, paths in
+            let candidates = (memberIDsByDatabase[database] ?? []).intersection(projectlessMetadata?.threadIDs ?? [])
+            return (database, projectMetadataLookup(database, paths, candidates))
+        })
+        var assignedSessionIDs: Set<String> = []
+        for metadata in metadataByDatabase.values {
+            assignedSessionIDs.formUnion(metadata.assignedSessionIDs)
+            for path in metadata.ownedPaths {
+                assignedSessionIDs.formUnion(projectSessionIDs[path] ?? [])
+            }
+        }
+        for index in projects.indices {
+            let lookups = projectLookups[index]
+            guard !lookups.isEmpty, lookups.count == projects[index].sources.count else { continue }
+            let names = lookups.compactMap { metadataByDatabase[$0.database]?.names[$0.path] }
+            guard names.count == lookups.count, Set(names).count == 1,
+                  let name = names.first else { continue }
+            result.projects[index].name = name
+        }
+        let indexedNames = CodexThreadMetadataReader.indexedThreadNames(
+            codexHomeDirectory: home, sessionIDs: Set(sessions.map(\.sessionID)))
+        for (database, indices) in sessionGroups {
+            let metadata = CodexThreadMetadataReader(databaseURL: database).metadata(
+                for: Set(indices.map { sessions[$0].sessionID }), indexedNames: indexedNames)
+            for index in indices {
+                let session = sessions[index]
+                if let title = metadata[session.sessionID]?.title {
+                    result.sessions[index] = session.withTitle(title)
+                }
+                if let path = session.workingDirectory {
+                    if let name = metadataByDatabase[database]?.names[path] {
+                        result.sessions[index].projectName = name
+                    }
+                    if metadataByDatabase[database]?.ownedPaths.contains(path) == true {
+                        assignedSessionIDs.insert(session.sessionID)
+                    }
+                }
+            }
+        }
+        return Self.codexBreakdownsWithProjectlessMetadata(
+            projects: result.projects,
+            sessions: result.sessions,
+            projectSessionIDs: projectSessionIDs,
+            metadata: projectlessMetadata,
+            assignedSessionIDs: assignedSessionIDs)
     }
 
     private static func codexReportView(
         options: CostUsageScanner.Options,
-        range: CostUsageScanner.CostUsageDayRange) -> CostUsageStoreReadView
+        range: CostUsageScanner.CostUsageDayRange,
+        sourceScope: OpenCodeLocalHistoryAdapter.ReadScope? = nil) -> CostUsageStoreReadView
     {
         let roots = CostUsageScanner.codexSessionsRoots(options: options)
         let rootsFingerprint = CostUsageScanner.codexRootsFingerprint(options: options)
-        // Keep a fallback detail read on the same validated connection.
-        let store = CostUsageStore(cacheRoot: options.cacheRoot)
-        var view = store.syncLoadCodexReadView(calendar: options.calendar, purpose: .status).scoped(to: roots)
-        if view.hasPendingScan {
-            view = store.syncLoadCodexReadView(calendar: options.calendar, purpose: .activity).scoped(to: roots)
+        let store = CostUsageStore(cacheRoot: options.cacheRoot, home: CodexHomeCostStoreScope.key(options: options))
+        func read(_ purpose: CostUsageStoreReadPurpose) -> CostUsageStoreReadView {
+            store.syncLoadCodexReadView(calendar: options.calendar, purpose: purpose, sourceScope: sourceScope)
+                .scoped(to: roots)
         }
-        if view.previousReport(range: range, rootsFingerprint: rootsFingerprint) == nil {
-            view = store.syncLoadCodexReadView(calendar: options.calendar, purpose: .report).scoped(to: roots)
-        }
+        var view = read(sourceScope == nil ? .status : .activity)
+        if view.hasPendingScan { view = read(.activity) }
+        if view.previousReport(range: range, rootsFingerprint: rootsFingerprint) == nil { view = read(.report) }
         return view
     }
 
@@ -1059,13 +1204,12 @@ public struct CostUsageFetcher: Sendable {
     }
 
     private static func loadPricedAntigravityLocalSnapshot(
-        environment: [String: String],
+        context: AntigravityLocalReader.Context,
         now: Date,
         historyDays: Int,
         calendar: Calendar,
         pricing: AntigravityPricingOptions) async throws -> CostUsageTokenSnapshot?
     {
-        let context = AntigravityLocalReader.Context(environment: environment)
         let snapshot = try await self.loadAntigravityLocalSnapshot(
             context: context,
             now: now,
@@ -1126,31 +1270,18 @@ public struct CostUsageFetcher: Sendable {
         for entry in daily.data {
             for breakdown in entry.modelBreakdowns ?? [] {
                 guard breakdown.costUSD == nil else { continue }
+                let pricingTargets: [(providerID: String, modelID: String)]
                 if provider == .antigravity {
-                    // Antigravity prices through the Claude resolver, and its routing variants
-                    // resolve against the base vendor model, so both IDs are worth fetching.
-                    let names = [breakdown.modelName]
-                        + [AntigravityLocalReader.pricingBaseModelID(for: breakdown.modelName)].compactMap(\.self)
-                    for name in names {
-                        for target in CostUsagePricing.claudeModelsDevPricingTargets(for: name) {
-                            targets.insert(ModelsDevPricingTarget(
-                                providerID: target.providerID,
-                                modelID: target.modelID))
-                        }
-                    }
+                    pricingTargets = AntigravityLocalReader.pricingRefreshTargets(for: breakdown.modelName)
                 } else if provider == .codex {
-                    guard OpenCodexRouteDispatcher.countsTowardCodexSubscription(modelName: breakdown.modelName)
-                    else { continue }
-                    guard !CostUsagePricing.isCodexUnattributedModel(breakdown.modelName) else { continue }
-                    for target in CostUsagePricing.codexModelsDevPricingTargets(for: breakdown.modelName) {
-                        targets.insert(ModelsDevPricingTarget(providerID: target.providerID, modelID: target.modelID))
-                    }
+                    guard OpenCodexRouteDispatcher.countsTowardCodexSubscription(modelName: breakdown.modelName),
+                          !CostUsagePricing.isCodexUnattributedModel(breakdown.modelName) else { continue }
+                    pricingTargets = CostUsagePricing.codexModelsDevPricingTargets(for: breakdown.modelName)
                 } else {
-                    for target in CostUsagePricing.claudeModelsDevPricingTargets(for: breakdown.modelName) {
-                        targets.insert(ModelsDevPricingTarget(
-                            providerID: target.providerID,
-                            modelID: target.modelID))
-                    }
+                    pricingTargets = CostUsagePricing.claudeModelsDevPricingTargets(for: breakdown.modelName)
+                }
+                for target in pricingTargets {
+                    targets.insert(ModelsDevPricingTarget(providerID: target.providerID, modelID: target.modelID))
                 }
             }
         }
@@ -1241,6 +1372,7 @@ public struct CostUsageFetcher: Sendable {
             let rootsFingerprint = CostUsageScanner.codexRootsFingerprint(options: options)
             let cache = CostUsageStoreAccess.readView(
                 cacheRoot: options.cacheRoot,
+                home: CodexHomeCostStoreScope.key(options: options),
                 calendar: options.calendar,
                 purpose: .activity).scoped(to: roots)
             guard cache.timeZoneIdentifier == options.calendar.timeZone.identifier,
@@ -1323,7 +1455,9 @@ public struct CostUsageFetcher: Sendable {
                 calendar: options.calendar)
             let roots = CostUsageScanner.codexSessionsRoots(options: options)
             let rootsFingerprint = CostUsageScanner.codexRootsFingerprint(options: options)
-            let cache = Self.codexReportView(options: options, range: range)
+            let sourceScope = OpenCodeLocalHistoryAdapter.readScope(
+                options: options, environment: environment, range: range)
+            let cache = Self.codexReportView(options: options, range: range, sourceScope: sourceScope)
             var reports: [CostUsageDailyReport] = []
             var projects: [CostUsageProjectBreakdown] = []
             var sessions: [CostUsageSessionBreakdown] = []
@@ -1344,19 +1478,23 @@ public struct CostUsageFetcher: Sendable {
                    range: range,
                    rootsFingerprint: rootsFingerprint)
             {
-                reports.append(previous.report)
+                reports.append(cache.mergingSource(into: previous.report, range: range))
                 staleSnapshotUpdatedAt = previous.updatedAt
                 if let updatedAt = previous.updatedAt {
                     scanTimes.append(updatedAt)
                 }
             } else if cache.timeZoneIdentifier == range.calendar.timeZone.identifier,
-                      !cache.days.isEmpty,
+                      cache.hasHistory,
                       cache.roots == rootsFingerprint,
                       !cache.windowExpandsCache(range)
             {
-                let daily = cache.dailyReport(
+                let projections = cache.reports(
                     range: range,
-                    cacheRoot: options.cacheRoot)
+                    cacheRoot: options.cacheRoot,
+                    roots: roots,
+                    includeBreakdowns: includeProjectAndSessionBreakdowns,
+                    includeProjects: cache.projectMetadataVersion == CostUsageScanner.codexProjectMetadataVersion)
+                let daily = projections.daily
                 if !daily.data.isEmpty {
                     reports.append(daily)
                     if cache.lastScanUnixMs > 0 {
@@ -1365,15 +1503,14 @@ public struct CostUsageFetcher: Sendable {
                         scanTimes.append(scanAt)
                     }
                     if includeProjectAndSessionBreakdowns {
-                        sessions = cache.sessions(
-                            range: range,
-                            cacheRoot: options.cacheRoot,
-                            roots: roots)
-                        if cache.projectMetadataVersion == CostUsageScanner.codexProjectMetadataVersion {
-                            projects.append(contentsOf: cache.projects(
-                                range: range,
-                                cacheRoot: options.cacheRoot))
-                        }
+                        sessions = projections.sessions
+                        projects = projections.projects
+                        (projects, sessions) = Self.codexBreakdownsWithMetadata(
+                            sessions,
+                            projects: projects,
+                            projectSessionIDs: cache.projectSessionIDs(range: range),
+                            sessionsRoot: roots.first,
+                            environment: environment)
                     }
                 }
             }
@@ -1390,6 +1527,8 @@ public struct CostUsageFetcher: Sendable {
                 }
             }
 
+            let nativeDetailsAreComplete = includeProjectAndSessionBreakdowns && nativeHistoryCoverageIsEstablished
+                && (cache.days.isEmpty || cache.projectMetadataVersion == CostUsageScanner.codexProjectMetadataVersion)
             let nativeSnapshot: CostUsageTokenSnapshot? = reports.isEmpty ? nil : Self.tokenSnapshot(
                 from: CostUsageDailyReport.merged(reports, calendar: options.calendar),
                 now: now,
@@ -1400,6 +1539,7 @@ public struct CostUsageFetcher: Sendable {
                 costProvenance: .listPriceEstimate,
                 projects: Self.mergedProjectBreakdowns(projects),
                 sessions: sessions,
+                detailsAreComplete: nativeDetailsAreComplete,
                 updatedAt: scanTimes.min())
             var accounting: PiSnapshotAccounting = .nativeOnly
 
@@ -1424,13 +1564,7 @@ public struct CostUsageFetcher: Sendable {
                 piHistoryIsComplete = piResult?.isComplete == true && piResult?.scopeFingerprint != nil
                 guard !requireCompleteHistory || piHistoryIsComplete else { return nil }
                 if let piResult, let scope = piResult.scopeFingerprint {
-                    if let nativeSnapshot {
-                        accounting = .includesPi(
-                            scope: scope,
-                            native: nativeSnapshot)
-                    } else {
-                        accounting = .piOnly(scope: scope)
-                    }
+                    accounting = nativeSnapshot.map { .includesPi(scope: scope, native: $0) } ?? .piOnly(scope: scope)
                     reports.append(piResult.report)
                     if let piLastScanAt = piResult.lastScanAt {
                         scanTimes.append(piLastScanAt)
@@ -1463,6 +1597,7 @@ public struct CostUsageFetcher: Sendable {
                     costProvenance: .listPriceEstimate,
                     projects: Self.mergedProjectBreakdowns(projects),
                     sessions: sessions,
+                    detailsAreComplete: nativeDetailsAreComplete && !piHistoryRequested,
                     updatedAt: scanTimes.min()),
                 accounting: accounting,
                 lastRefreshAt: piHistoryRequested || staleSnapshotUpdatedAt != nil ? nil : nativeScanAt,
@@ -1537,27 +1672,28 @@ public struct CostUsageFetcher: Sendable {
         codexHomePath: String?,
         overrideScannerOptions: CostUsageScanner.Options?) -> CostUsageScanner.Options
     {
-        var options = overrideScannerOptions ?? CostUsageScanner.Options()
-        if let codexHomePath = codexHomePath?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !codexHomePath.isEmpty
-        {
-            options.codexSessionsRoot = URL(fileURLWithPath: codexHomePath, isDirectory: true)
-                .appendingPathComponent("sessions", isDirectory: true)
-        }
+        let options = Self.resolvedScannerOptions(
+            overrideScannerOptions,
+            provider: .codex, // Provider-specific by design: local history belongs to the selected Codex home.
+            codexHomePath: codexHomePath)
         return CodexLocalDataScope.resolve(options: options).applying(to: options)
     }
 
     private static func loadBedrockDailyReport(
         environment: [String: String],
         since: Date,
-        until: Date) async throws -> CostUsageDailyReport
+        until: Date,
+        forceRefresh: Bool) async throws -> (report: CostUsageDailyReport, updatedAt: Date)
     {
         let resolved = try await BedrockCredentialResolver.resolve(environment: environment)
         return try await BedrockUsageFetcher.fetchDailyReport(
             credentials: resolved.credentials,
+            region: resolved.region,
             since: since,
             until: until,
-            environment: environment)
+            environment: environment,
+            forceRefresh: forceRefresh,
+            cache: environment[BedrockSettingsReader.apiURLKey] == nil ? .shared : nil)
     }
 
     #if os(macOS)
@@ -1599,7 +1735,7 @@ public struct CostUsageFetcher: Sendable {
     {
         let allRows = CursorLocalCSVReader.cachedCSVPaths().flatMap { CursorLocalCSVReader.parseFile(at: $0) }
         guard !allRows.isEmpty else { return nil }
-        let full = CursorLocalCSVReader.makeDailyReport(from: allRows, calendar: calendar, now: now)
+        let full = CursorLocalCSVReader.makeDailyReport(from: allRows, calendar: calendar)
         let daily = Self.windowedDailyReport(full, historyDays: historyDays, now: now, calendar: calendar)
         guard !daily.data.isEmpty else { return nil }
         return Self.tokenSnapshot(
@@ -1681,6 +1817,7 @@ public struct CostUsageFetcher: Sendable {
         historyLabel: String? = nil,
         projects: [CostUsageProjectBreakdown] = [],
         sessions: [CostUsageSessionBreakdown] = [],
+        detailsAreComplete: Bool = false,
         updatedAt: Date? = nil) -> CostUsageTokenSnapshot
     {
         let sessionEntry = useCurrentLocalDayForSession
@@ -1722,6 +1859,7 @@ public struct CostUsageFetcher: Sendable {
             daily: daily.data,
             projects: projects,
             sessions: sessions,
+            detailsAreComplete: detailsAreComplete,
             hourly: daily.hourly,
             quotaSlices: daily.quotaSlices,
             updatedAt: updatedAt ?? now)
@@ -1807,11 +1945,15 @@ public struct CostUsageFetcher: Sendable {
     {
         var dailyByPath: [String: [CostUsageDailyReport]] = [:]
         var namesByPath: [String: String] = [:]
+        var projectlessByPath: [String: Bool] = [:]
         var sourceDailyByProjectPath: [String: [String: [CostUsageDailyReport]]] = [:]
         var sourceNamesByProjectPath: [String: [String: String]] = [:]
         for project in projects {
             let key = project.path ?? ""
-            namesByPath[key] = project.name
+            if namesByPath[key] == nil || projectlessByPath[key] != false || !project.isProjectless {
+                namesByPath[key] = project.name
+            }
+            projectlessByPath[key] = (projectlessByPath[key] ?? true) && project.isProjectless
             dailyByPath[key, default: []].append(CostUsageDailyReport(data: project.daily, summary: nil))
             let sources = project.sources.isEmpty
                 ? [
@@ -1842,7 +1984,8 @@ public struct CostUsageFetcher: Sendable {
                 modelBreakdowns: Self.projectModelBreakdowns(from: merged.data),
                 sources: Self.mergedProjectSources(
                     sourceDailyByPath: sourceDailyByProjectPath[key] ?? [:],
-                    sourceNamesByPath: sourceNamesByProjectPath[key] ?? [:]))
+                    sourceNamesByPath: sourceNamesByProjectPath[key] ?? [:]),
+                isProjectless: projectlessByPath[key] == true)
         }
         .sorted { lhs, rhs in
             let lhsCost = lhs.totalCostUSD ?? -1
@@ -1893,19 +2036,7 @@ public struct CostUsageFetcher: Sendable {
     {
         let summaries = CostUsageDailyReport.modelCostSummaries(from: entries)
         guard !summaries.isEmpty else { return nil }
-        return summaries.sorted { lhs, rhs in
-            let lhsCost = lhs.costUSD ?? -1
-            let rhsCost = rhs.costUSD ?? -1
-            if lhsCost != rhsCost {
-                return lhsCost > rhsCost
-            }
-            let lhsTokens = lhs.totalTokens ?? -1
-            let rhsTokens = rhs.totalTokens ?? -1
-            if lhsTokens != rhsTokens {
-                return lhsTokens > rhsTokens
-            }
-            return lhs.modelName > rhs.modelName
-        }
+        return CostUsageDailyReport.sortedModelBreakdowns(summaries)
     }
 }
 
@@ -1920,9 +2051,9 @@ extension CostUsageFetcher {
         for (path, usage) in scopedFiles.sorted(by: { $0.key < $1.key }) {
             progressHasher.combine(path)
             progressHasher.combine(usage.codexScanFileId)
-            progressHasher.combine(usage.codexScanTargetSize)
             progressHasher.combine(usage.codexScanComplete)
             if usage.codexScanComplete == false {
+                progressHasher.combine(usage.codexScanTargetSize)
                 progressHasher.combine(usage.parsedBytes)
                 progressHasher.combine(usage.size)
                 progressHasher.combine(usage.codexJSONLResumeState?.offset)

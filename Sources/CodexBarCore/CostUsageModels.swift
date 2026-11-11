@@ -112,68 +112,6 @@ public struct CostUsageQuotaWeek: Sendable, Equatable {
     }
 }
 
-/// An estimated local Codex conversation total derived from one session log.
-/// This is intentionally distinct from account-level billing or quota data.
-public struct CostUsageSessionBreakdown: Sendable, Equatable, Identifiable {
-    public let sessionID: String
-    public let lastActivity: Date
-    public let inputTokens: Int?
-    public let cachedInputTokens: Int?
-    public let outputTokens: Int?
-    public let reasoningTokens: Int?
-    public let totalTokens: Int?
-    public let requestCount: Int?
-    public let costUSD: Double?
-    public let modelBreakdowns: [CostUsageDailyReport.ModelBreakdown]
-    /// Canonical project path, matching the key of the session's Projects row.
-    public let projectPath: String?
-    public let projectName: String?
-    /// Thread name from Codex metadata, when one exists.
-    public private(set) var title: String?
-    /// Original rollout directory; relative SQLite homes must not use the canonical project path.
-    var workingDirectory: String?
-
-    public var id: String {
-        self.sessionID
-    }
-
-    public init(
-        sessionID: String,
-        lastActivity: Date,
-        inputTokens: Int?,
-        cachedInputTokens: Int?,
-        outputTokens: Int?,
-        reasoningTokens: Int? = nil,
-        totalTokens: Int?,
-        requestCount: Int?,
-        costUSD: Double?,
-        modelBreakdowns: [CostUsageDailyReport.ModelBreakdown],
-        projectPath: String? = nil,
-        projectName: String? = nil,
-        title: String? = nil)
-    {
-        self.sessionID = sessionID
-        self.lastActivity = lastActivity
-        self.inputTokens = inputTokens
-        self.cachedInputTokens = cachedInputTokens
-        self.outputTokens = outputTokens
-        self.reasoningTokens = reasoningTokens
-        self.totalTokens = totalTokens
-        self.requestCount = requestCount
-        self.costUSD = costUSD
-        self.modelBreakdowns = modelBreakdowns
-        self.projectPath = projectPath
-        self.projectName = projectName
-        self.title = title
-    }
-
-    public func withTitle(_ title: String?) -> CostUsageSessionBreakdown {
-        var copy = self
-        copy.title = title
-        return copy
-    }
-}
-
 /// An hour-aligned bucket used by spend charts and legacy quota history.
 public struct CostUsageHourlyEntry: Sendable, Equatable {
     public let hour: Date
@@ -250,14 +188,16 @@ public struct CostUsageTokenSnapshot: Sendable, Equatable {
     /// non-reversible fingerprint, not account identity, and is not emitted by CLI payloads.
     public let credentialScopeFingerprint: String?
     public let daily: [CostUsageDailyReport.Entry]
+    /// Whether this read produced the complete project and session projection, including a confirmed empty result.
+    public let detailsAreComplete: Bool
     public let projects: [CostUsageProjectBreakdown]
     public let sessions: [CostUsageSessionBreakdown]
     /// Hour-aligned buckets for spend charts and legacy quota history.
     public let hourly: [CostUsageHourlyEntry]
     /// Exact event-time slices for quota-window projection. Empty for legacy/coarse providers.
-    public let quotaSlices: [CostUsageTimedEntry]
+    public private(set) var quotaSlices: [CostUsageTimedEntry]
     public let updatedAt: Date
-    let quotaProjectionMemo = CostUsageQuotaProjectionMemo()
+    private(set) var quotaProjectionMemo = CostUsageQuotaProjectionMemo()
 
     public init(
         sessionTokens: Int?,
@@ -277,6 +217,7 @@ public struct CostUsageTokenSnapshot: Sendable, Equatable {
         daily: [CostUsageDailyReport.Entry],
         projects: [CostUsageProjectBreakdown] = [],
         sessions: [CostUsageSessionBreakdown] = [],
+        detailsAreComplete: Bool = false,
         hourly: [CostUsageHourlyEntry] = [],
         quotaSlices: [CostUsageTimedEntry] = [],
         updatedAt: Date)
@@ -297,11 +238,21 @@ public struct CostUsageTokenSnapshot: Sendable, Equatable {
         self.costProvenance = costProvenance
         self.credentialScopeFingerprint = credentialScopeFingerprint
         self.daily = daily
+        self.detailsAreComplete = detailsAreComplete
         self.projects = projects
         self.sessions = sessions
         self.hourly = hourly
         self.quotaSlices = quotaSlices
         self.updatedAt = updatedAt
+    }
+
+    package func droppingQuotaSlices() -> Self {
+        guard !self.quotaSlices.isEmpty else { return self }
+        var copy = self
+        copy.quotaSlices = []
+        // The shared memo belongs to the original immutable entries, including their exact slices.
+        copy.quotaProjectionMemo = CostUsageQuotaProjectionMemo()
+        return copy
     }
 
     /// Coverage is established *and* the read of that coverage ran to completion. Surfaces that
@@ -417,7 +368,9 @@ public struct CostUsageTokenSnapshot: Sendable, Equatable {
 public struct CostUsageProjectBreakdown: Sendable, Equatable {
     public static let unknownProjectName = "Unknown project"
 
-    public let name: String
+    public internal(set) var name: String
+    /// Explicit desktop chat ownership is display metadata, never an accounting key.
+    public internal(set) var isProjectless: Bool
     public let path: String?
     public let totalTokens: Int?
     public let totalCostUSD: Double?
@@ -432,7 +385,8 @@ public struct CostUsageProjectBreakdown: Sendable, Equatable {
         totalCostUSD: Double?,
         daily: [CostUsageDailyReport.Entry],
         modelBreakdowns: [CostUsageDailyReport.ModelBreakdown]?,
-        sources: [CostUsageProjectSourceBreakdown] = [])
+        sources: [CostUsageProjectSourceBreakdown] = [],
+        isProjectless: Bool = false)
     {
         self.name = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? Self.unknownProjectName
@@ -444,6 +398,7 @@ public struct CostUsageProjectBreakdown: Sendable, Equatable {
         self.daily = daily
         self.modelBreakdowns = modelBreakdowns
         self.sources = sources
+        self.isProjectless = isProjectless
     }
 }
 
@@ -476,6 +431,9 @@ public struct CostUsageProjectSourceBreakdown: Sendable, Equatable {
 }
 
 public struct CostUsageDailyReport: Sendable, Codable {
+    #if DEBUG
+    @TaskLocal static var entryAccumulationObserverForTesting: (@Sendable () -> Void)?
+    #endif
     public struct ModelBreakdown: Sendable, Codable, Equatable {
         public let modelName: String
         public let costUSD: Double?
@@ -491,6 +449,11 @@ public struct CostUsageDailyReport: Sendable, Codable {
         public let standardTokens: Int?
         public let priorityTokens: Int?
         public let incompleteRequestCount: Int?
+        /// Provenance marker (#4752 point 2): this breakdown's cost comes from a source
+        /// that **recorded** the amounts itself (e.g. the OpenCode local database), not
+        /// from CodexBar's per-model pricing. Report-model case only — never persisted in
+        /// the store's enums, resolved from the registration at read time.
+        public let sourceRecorded: Bool?
 
         private enum CodingKeys: String, CodingKey {
             case modelName
@@ -509,6 +472,7 @@ public struct CostUsageDailyReport: Sendable, Codable {
             case standardTokens
             case priorityTokens
             case incompleteRequestCount
+            case sourceRecorded
         }
 
         public init(from decoder: Decoder) throws {
@@ -531,6 +495,7 @@ public struct CostUsageDailyReport: Sendable, Codable {
             self.standardTokens = try container.decodeIfPresent(Int.self, forKey: .standardTokens)
             self.priorityTokens = try container.decodeIfPresent(Int.self, forKey: .priorityTokens)
             self.incompleteRequestCount = try container.decodeIfPresent(Int.self, forKey: .incompleteRequestCount)
+            self.sourceRecorded = try container.decodeIfPresent(Bool.self, forKey: .sourceRecorded)
         }
 
         public init(
@@ -547,7 +512,8 @@ public struct CostUsageDailyReport: Sendable, Codable {
             priorityCostUSD: Double? = nil,
             standardTokens: Int? = nil,
             priorityTokens: Int? = nil,
-            incompleteRequestCount: Int? = nil)
+            incompleteRequestCount: Int? = nil,
+            sourceRecorded: Bool? = nil)
         {
             self.modelName = modelName
             self.costUSD = costUSD
@@ -563,6 +529,7 @@ public struct CostUsageDailyReport: Sendable, Codable {
             self.standardTokens = standardTokens
             self.priorityTokens = priorityTokens
             self.incompleteRequestCount = incompleteRequestCount
+            self.sourceRecorded = sourceRecorded
         }
 
         public func encode(to encoder: Encoder) throws {
@@ -581,6 +548,14 @@ public struct CostUsageDailyReport: Sendable, Codable {
             try container.encodeIfPresent(self.standardTokens, forKey: .standardTokens)
             try container.encodeIfPresent(self.priorityTokens, forKey: .priorityTokens)
             try container.encodeIfPresent(self.incompleteRequestCount, forKey: .incompleteRequestCount)
+            try container.encodeIfPresent(self.sourceRecorded, forKey: .sourceRecorded)
+        }
+
+        /// Accumulation key keeping source-recorded and priced breakdowns of the SAME
+        /// model name apart (#4752 point 2): merging must never fold recorded $0
+        /// subscription usage into a same-named priced estimate, or vice versa.
+        var provenanceKey: String {
+            self.modelName + (self.sourceRecorded == true ? "␟source-recorded" : "")
         }
     }
 
@@ -918,12 +893,11 @@ extension CostUsageDailyReport {
         var accumulators: [String: BreakdownAccumulator] = [:]
         for entry in entries {
             for breakdown in entry.modelBreakdowns ?? [] {
-                accumulators[breakdown.modelName, default: BreakdownAccumulator()].add(breakdown)
+                accumulators[breakdown.provenanceKey, default: BreakdownAccumulator()].add(breakdown)
             }
         }
-        return accumulators.map { name, accumulator in
-            accumulator.build(modelName: name, includeActivity: false)
-        }
+        return accumulators
+            .map { _, accumulator in accumulator.build(includeActivity: false) }
     }
 
     struct OptionalCountAccumulator {
@@ -952,6 +926,8 @@ extension CostUsageDailyReport {
     }
 
     private struct BreakdownAccumulator {
+        var modelName = ""
+        var sourceRecorded = false
         var tokenMix = CostUsageTokenMix()
         var requestCount = OptionalCountAccumulator()
         var totalTokens = OptionalCountAccumulator()
@@ -968,6 +944,8 @@ extension CostUsageDailyReport {
         var incompleteRequestCount = 0
 
         mutating func add(_ breakdown: ModelBreakdown) {
+            self.modelName = breakdown.modelName
+            self.sourceRecorded = breakdown.sourceRecorded == true
             self.tokenMix.merge(CostUsageTokenMix(
                 inputTokens: breakdown.inputTokens,
                 outputTokens: breakdown.outputTokens,
@@ -1009,9 +987,9 @@ extension CostUsageDailyReport {
             self.priorityTokens.add(breakdown.priorityTokens)
         }
 
-        func build(modelName: String, includeActivity: Bool = true) -> ModelBreakdown {
+        func build(modelName: String? = nil, includeActivity: Bool = true) -> ModelBreakdown {
             ModelBreakdown(
-                modelName: modelName,
+                modelName: modelName ?? self.modelName,
                 costUSD: self.sawCost && self.costIsValid ? self.costUSD : nil,
                 totalTokens: self.totalTokensAreComplete ? self.totalTokens.value : nil,
                 requestCount: includeActivity ? self.requestCount.value : nil,
@@ -1024,7 +1002,8 @@ extension CostUsageDailyReport {
                 priorityCostUSD: self.sawPriorityCost ? self.priorityCostUSD : nil,
                 standardTokens: self.standardTokens.value,
                 priorityTokens: self.priorityTokens.value,
-                incompleteRequestCount: self.incompleteRequestCount > 0 ? self.incompleteRequestCount : nil)
+                incompleteRequestCount: self.incompleteRequestCount > 0 ? self.incompleteRequestCount : nil,
+                sourceRecorded: self.sourceRecorded ? true : nil)
         }
     }
 
@@ -1044,6 +1023,9 @@ extension CostUsageDailyReport {
         var breakdowns: [String: BreakdownAccumulator] = [:]
 
         mutating func add(_ entry: Entry) {
+            #if DEBUG
+            CostUsageDailyReport.entryAccumulationObserverForTesting?()
+            #endif
             self.tokenMix.merge(.from(entry: entry))
             self.requestCount.add(entry.requestCount)
             // Classify each source before combining costs: a priced source cannot price another source's missing rows.
@@ -1095,9 +1077,9 @@ extension CostUsageDailyReport {
             }
             if let modelBreakdowns = entry.modelBreakdowns {
                 for breakdown in modelBreakdowns {
-                    var accumulator = self.breakdowns[breakdown.modelName] ?? BreakdownAccumulator()
+                    var accumulator = self.breakdowns[breakdown.provenanceKey] ?? BreakdownAccumulator()
                     accumulator.add(breakdown)
-                    self.breakdowns[breakdown.modelName] = accumulator
+                    self.breakdowns[breakdown.provenanceKey] = accumulator
                     self.modelsUsed.insert(breakdown.modelName)
                 }
             }
@@ -1112,8 +1094,8 @@ extension CostUsageDailyReport {
                 guard !self.breakdowns.isEmpty else { return nil }
                 return CostUsageDailyReport.sortedModelBreakdowns(
                     self.breakdowns
-                        .map { modelName, accumulator in
-                            accumulator.build(modelName: modelName)
+                        .map { _, accumulator in
+                            accumulator.build()
                         })
             }()
             let modelsUsed = self.modelsUsed.isEmpty ? nil : self.modelsUsed.sorted()
@@ -1149,7 +1131,7 @@ extension CostUsageDailyReport {
         _ reports: [CostUsageDailyReport],
         calendar: Calendar = .current) -> CostUsageDailyReport
     {
-        let entries = self.mergedEntries(from: reports, calendar: calendar)
+        let entries = self.mergedEntries(from: reports.lazy.flatMap(\.data), calendar: calendar)
         let mergedHourly = self.mergedHourly(from: reports, calendar: calendar)
         let mergedQuotaSlices = self.mergedQuotaSlices(from: reports)
         guard !entries.isEmpty || !mergedHourly.isEmpty || !mergedQuotaSlices.isEmpty else {
@@ -1174,13 +1156,11 @@ extension CostUsageDailyReport {
             for entry in report.hourly {
                 let hour = calendar.dateInterval(of: .hour, for: entry.hour)?.start ?? entry.hour
                 reportHours.insert(hour)
-                var accumulator = buckets[hour] ?? CostUsageTemporalTotals()
-                accumulator.add(
+                buckets[hour, default: CostUsageTemporalTotals()].add(
                     totalTokens: entry.totalTokens,
                     costUSD: entry.costUSD,
                     tokensAreComplete: entry.tokensAreComplete,
                     costIsComplete: entry.costIsComplete)
-                buckets[hour] = accumulator
             }
 
             // An exact-only source still contributes to the merged chart hour. This is a true
@@ -1191,23 +1171,19 @@ extension CostUsageDailyReport {
                 let hour = calendar.dateInterval(of: .hour, for: entry.timestamp)?.start
                     ?? entry.timestamp
                 guard !reportHours.contains(hour) else { continue }
-                var accumulator = exactByHour[hour] ?? CostUsageTemporalTotals()
-                accumulator.add(
+                exactByHour[hour, default: CostUsageTemporalTotals()].add(
                     totalTokens: entry.totalTokens,
                     costUSD: entry.costUSD,
                     tokensAreComplete: entry.tokensAreComplete,
                     costIsComplete: entry.costIsComplete)
-                exactByHour[hour] = accumulator
             }
             for (hour, exact) in exactByHour {
                 let entry = exact.timedEntry(timestamp: hour)
-                var accumulator = buckets[hour] ?? CostUsageTemporalTotals()
-                accumulator.add(
+                buckets[hour, default: CostUsageTemporalTotals()].add(
                     totalTokens: entry.totalTokens,
                     costUSD: entry.costUSD,
                     tokensAreComplete: entry.tokensAreComplete,
                     costIsComplete: entry.costIsComplete)
-                buckets[hour] = accumulator
             }
         }
         return buckets.keys.sorted().map { hour in
@@ -1218,18 +1194,28 @@ extension CostUsageDailyReport {
     private static func mergedQuotaSlices(
         from reports: [CostUsageDailyReport]) -> [CostUsageTimedEntry]
     {
-        let hasQuotaSlices = reports.contains { !$0.quotaSlices.isEmpty }
-        guard hasQuotaSlices else { return [] }
+        let contributors = reports.filter { !$0.quotaSlices.isEmpty }
+        guard let slices = contributors.first?.quotaSlices else { return [] }
+        if contributors.count == 1 {
+            var previousTimestamp = -Double.infinity
+            let isNormalized = slices.allSatisfy { entry in
+                let timestamp = entry.timestamp.timeIntervalSinceReferenceDate
+                defer { previousTimestamp = timestamp }
+                // Single-entry accumulation preserves nils and completeness, but changes invalid values and -0.
+                return timestamp.isFinite && timestamp > previousTimestamp
+                    && entry.totalTokens.map { $0 >= 0 } != false
+                    && entry.costUSD.map { $0.isFinite && $0.sign == .plus } != false
+            }
+            if isNormalized { return slices }
+        }
         var buckets: [Date: CostUsageTemporalTotals] = [:]
         for report in reports {
             for entry in report.quotaSlices {
-                var accumulator = buckets[entry.timestamp] ?? CostUsageTemporalTotals()
-                accumulator.add(
+                buckets[entry.timestamp, default: CostUsageTemporalTotals()].add(
                     totalTokens: entry.totalTokens,
                     costUSD: entry.costUSD,
                     tokensAreComplete: entry.tokensAreComplete,
                     costIsComplete: entry.costIsComplete)
-                buckets[entry.timestamp] = accumulator
             }
         }
         return buckets.keys.sorted().map { timestamp in
@@ -1237,20 +1223,16 @@ extension CostUsageDailyReport {
         }
     }
 
-    private static func mergedEntries(
-        from reports: [CostUsageDailyReport],
+    static func mergedEntries(
+        from entries: some Sequence<Entry>,
         calendar: Calendar) -> [Entry]
     {
         var dayAccumulators: [String: EntryAccumulator] = [:]
-        for report in reports {
-            for entry in report.data {
-                let rawDate = entry.date.trimmingCharacters(in: .whitespacesAndNewlines)
-                let dayKey = CostUsageTokenSnapshot.localDayKey(for: rawDate, calendar: calendar)
-                    ?? rawDate
-                var accumulator = dayAccumulators[dayKey] ?? EntryAccumulator()
-                accumulator.add(entry)
-                dayAccumulators[dayKey] = accumulator
-            }
+        for entry in entries {
+            let rawDate = entry.date.trimmingCharacters(in: .whitespacesAndNewlines)
+            let dayKey = CostUsageTokenSnapshot.localDayKey(for: rawDate, calendar: calendar)
+                ?? rawDate
+            dayAccumulators[dayKey, default: EntryAccumulator()].add(entry)
         }
 
         return dayAccumulators
@@ -1280,7 +1262,7 @@ extension CostUsageDailyReport {
             totalCostUSD: totals.resolvedCostUSD())
     }
 
-    private static func sortedModelBreakdowns(_ breakdowns: [ModelBreakdown]) -> [ModelBreakdown] {
+    static func sortedModelBreakdowns(_ breakdowns: [ModelBreakdown]) -> [ModelBreakdown] {
         breakdowns.sorted { lhs, rhs in
             let lhsCost = lhs.costUSD ?? -1
             let rhsCost = rhs.costUSD ?? -1

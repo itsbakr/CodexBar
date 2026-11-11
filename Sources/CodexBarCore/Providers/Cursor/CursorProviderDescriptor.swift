@@ -27,7 +27,11 @@ public enum CursorProviderDescriptor {
             menuBarMetrics: ProviderMenuBarMetricCapabilities(
                 supported: [.automatic, .primary, .secondary, .tertiary, .extraUsage],
                 tertiaryRequiresWindow: true,
-                namedExtras: [CursorSandUsageStatus.extraWindowID: CursorSandUsageStatus.extraWindowTitle]),
+                namedExtras: [CursorSandUsageStatus.extraWindowID: CursorSandUsageStatus.extraWindowTitle],
+                // Several Cursor pools fit in the menu bar only with short tags; Total and Third Party
+                // would both derive "T", so the tags are explicit.
+                laneShortLabels: [.primary: "T", .secondary: "C", .tertiary: "TP"],
+                namedExtraShortLabels: [CursorSandUsageStatus.extraWindowID: "GB"]),
             settingsSection: .init(CursorProviderSettingsKey.self, cookieSettings: CursorProviderSettings.self),
             credentials: self.credentials,
             metadata: ProviderMetadata(
@@ -67,18 +71,24 @@ public enum CursorProviderDescriptor {
                     ProviderColor(hex: 0xF54E00),
                     ProviderColor(hex: 0x1B1913),
                     ProviderColor(hex: 0xEDECEC),
-                ],
-                widgetColor: ProviderColor(hex: 0x00BFA5)),
+                ]),
             tokenCost: ProviderTokenCostConfig(
                 supportsTokenCost: true,
                 noDataMessage: { "No Cursor cost usage found. Sign in to Cursor in your browser or the Cursor app." },
                 menuHintLines: [.estimate],
-                supportsTokenSnapshot: self.supportsTokenSnapshot,
+                supportsTokenSnapshot: self.supportsCostCommand,
                 settingsStatusOrder: 2,
                 estimateDisclaimer: "From Cursor's usage dashboard at vendor token rates; may differ from your " +
                     "invoice."),
             pace: ProviderPaceCapability(resetWindowPace: .windowDurationPresent),
             presentation: ProviderUsagePresentation(
+                rateWindowLabeler: { metadata, snapshot, _ in
+                    ProviderRateWindowLabels(
+                        primary: Self.primaryLabel(snapshot: snapshot) ?? metadata.sessionLabel,
+                        secondary: Self.primaryLabel(snapshot: snapshot) ?? metadata.weeklyLabel,
+                        tertiary: metadata.opusLabel ?? "Sonnet",
+                        showsTertiary: metadata.supportsOpus)
+                },
                 extraRateWindowSelector: { snapshot in
                     (snapshot.extraRateWindows ?? []).filter { $0.id == CursorSandUsageStatus.extraWindowID }
                 },
@@ -110,7 +120,8 @@ public enum CursorProviderDescriptor {
                     #else
                     false
                     #endif
-                }))
+                }),
+            nativeAppBundleIdentifiers: ["com.todesktop.230313mzl4w4u92"])
     }
 
     private static var supportsCostCommand: Bool {
@@ -121,6 +132,31 @@ public enum CursorProviderDescriptor {
         #endif
     }
 
+    /// The X Subscription's shared weekly pool replaces the monthly Total lane as the primary window.
+    public static func primaryLabel(snapshot: UsageSnapshot) -> String? {
+        self.sharedWeeklyPool(snapshot: snapshot) == nil ? nil : "Weekly"
+    }
+
+    /// A weekly shape alone cannot distinguish legacy allowances from a unified pool.
+    public static func sharedWeeklyPool(snapshot: UsageSnapshot) -> RateWindow? {
+        // The private CLI cache redacts identity but retains this non-identifying Cursor classification.
+        guard snapshot.cursorHasUnifiedWeeklyPool,
+              snapshot.identity?.providerID == nil || snapshot.identity?.providerID == .cursor,
+              let primary = snapshot.primary, primary.windowMinutes == 10080, snapshot.secondary == nil,
+              snapshot.detailRow(label: "Request quota") == nil
+        else {
+            return nil
+        }
+        return primary
+    }
+
+    /// Persisted Grok Bot percentage tokens still name this pool after it becomes primary.
+    public static func menuBarExtras(snapshot: UsageSnapshot) -> [NamedRateWindow] {
+        guard let window = self.sharedWeeklyPool(snapshot: snapshot) else { return snapshot.extraRateWindows ?? [] }
+        return [NamedRateWindow(
+            id: CursorSandUsageStatus.extraWindowID, title: CursorSandUsageStatus.extraWindowTitle, window: window)]
+    }
+
     /// Grok Bot is a named extra 7-day allowance. Cursor's monthly Auto bar is the secondary lane
     /// (`weeklyLabel` "Cursor"), so it is the semantic weekly window. The default duration matcher
     /// would pick Grok Bot instead and paint that weekly pace onto Cursor Auto after a billing reset.
@@ -128,8 +164,8 @@ public enum CursorProviderDescriptor {
         let weekly = snapshot.secondary.flatMap { window -> RateWindow? in
             guard !window.isSyntheticPlaceholder else { return nil }
             return window
-        }
-        return ProviderSemanticWindows(session: nil, weekly: weekly)
+        } ?? Self.sharedWeeklyPool(snapshot: snapshot)
+        return ProviderSemanticWindows(session: Self.sharedWeeklyPool(snapshot: snapshot), weekly: weekly)
     }
 
     private static func menuBarWindow(
@@ -148,16 +184,7 @@ public enum CursorProviderDescriptor {
         if !subquotas.isEmpty, usableSubquotas.isEmpty {
             return .resolved(subquotas.max(by: { $0.usedPercent < $1.usedPercent }))
         }
-        return .resolved(([total].compactMap(\.self) + usableSubquotas)
-            .max(by: { $0.usedPercent < $1.usedPercent }))
-    }
-
-    private static var supportsTokenSnapshot: Bool {
-        #if os(macOS)
-        true
-        #else
-        false
-        #endif
+        return .automaticCandidates([total].compactMap(\.self) + usableSubquotas)
     }
 }
 
@@ -166,13 +193,13 @@ struct CursorStatusFetchStrategy: ProviderFetchStrategy {
     let kind: ProviderFetchKind = .web
 
     func isAvailable(_ context: ProviderFetchContext) async -> Bool {
-        guard context.settings?.cursor?.cookieSource != .off else { return false }
-        return true
+        context.settings?.cursor?.cookieSource != .off
     }
 
     func fetch(_ context: ProviderFetchContext) async throws -> ProviderFetchResult {
         let probe = CursorStatusProbe(browserDetection: context.browserDetection)
-        let manual = Self.manualCookieHeader(from: context)
+        let manual = context.settings?.cursor?.cookieSource == .manual
+            ? (context.settings?.cursor?.manualCookieHeader ?? "") : nil
         let logger: ((String) -> Void)? = context.verbose
             ? { message in CodexBarLog.logger(LogCategories.provider(.cursor)).verbose(message) }
             : nil
@@ -187,10 +214,5 @@ struct CursorStatusFetchStrategy: ProviderFetchStrategy {
 
     func shouldFallback(on _: Error, context _: ProviderFetchContext) -> Bool {
         false
-    }
-
-    private static func manualCookieHeader(from context: ProviderFetchContext) -> String? {
-        guard context.settings?.cursor?.cookieSource == .manual else { return nil }
-        return CookieHeaderNormalizer.normalize(context.settings?.cursor?.manualCookieHeader)
     }
 }

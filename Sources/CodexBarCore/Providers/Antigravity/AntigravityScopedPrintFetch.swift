@@ -37,10 +37,8 @@ struct AntigravityAgyFileTokenPayload: Codable, Equatable, Sendable {
 
 extension AntigravityAgyFileTokenPayload {
     init?(credentials: AntigravityOAuthCredentials) {
-        guard let accessToken = credentials.accessToken?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !accessToken.isEmpty,
-              let refreshToken = credentials.refreshToken?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !refreshToken.isEmpty,
+        guard let accessToken = credentials.accessToken?.trimmedNonEmpty,
+              let refreshToken = credentials.refreshToken?.trimmedNonEmpty,
               let expiryDate = credentials.expiryDate
         else {
             return nil
@@ -103,16 +101,14 @@ enum AntigravityScopedAgyStaging {
             "all_proxy",
             "no_proxy",
         ] {
-            if let value = environment[key]?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty {
+            if let value = environment[key]?.trimmedNonEmpty {
                 child[key] = value
             }
         }
-        child["PATH"] = PathBuilder.effectivePATH(
-            purposes: [.tty], env: child, loginPATH: LoginShellPathCache.shared.current)
         child["HOME"] = home.path
         child["PWD"] = home.path
         child["SSH_TTY"] = "codexbar-scoped"
-        return child
+        return AntigravityCLIHTTPSFetchStrategy.childEnvironment(child)
     }
 
     /// ID tokens are optional: CodexBar's OAuth scopes do not request `openid`.
@@ -153,10 +149,7 @@ enum AntigravityScopedAgyStaging {
     }
 
     static func normalizedEmail(_ email: String?) -> String? {
-        guard let trimmed = email?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
-            return nil
-        }
-        return trimmed.lowercased()
+        email?.trimmedNonEmpty?.lowercased()
     }
 
     /// Reads the staged token file as `agy` left it after a run. `agy` rewrites
@@ -186,21 +179,38 @@ enum AntigravityScopedAgyStaging {
             return nil
         }
         var updated = original
-        let accessToken = payload.token.accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        let refreshToken = payload.token.refreshToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !accessToken.isEmpty {
+        if let accessToken = payload.token.accessToken.trimmedNonEmpty {
             updated.accessToken = accessToken
         }
-        if !refreshToken.isEmpty {
+        if let refreshToken = payload.token.refreshToken.trimmedNonEmpty {
             updated.refreshToken = refreshToken
         }
         if let expiry = ISO8601DateParser.parse(payload.token.expiry) {
             updated.expiryDateMilliseconds = expiry.timeIntervalSince1970 * 1000
         }
-        if let idToken = payload.idToken?.trimmingCharacters(in: .whitespacesAndNewlines), !idToken.isEmpty {
+        if let idToken = payload.idToken?.trimmedNonEmpty {
             updated.idToken = idToken
         }
         return updated
+    }
+
+    private static let fullBudgetIdentitySession = Self.makeIdentitySession(timeout: 15)
+
+    static func identitySession(timeout: TimeInterval) -> URLSession {
+        // Shorter budgets need their own resource deadline.
+        timeout == 15 ? self.fullBudgetIdentitySession : self.makeIdentitySession(timeout: timeout)
+    }
+
+    private static func makeIdentitySession(timeout: TimeInterval) -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        configuration.urlCredentialStorage = nil
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.timeoutIntervalForRequest = timeout
+        configuration.timeoutIntervalForResource = timeout
+        return ProviderHTTPClient.redirectGuardedSession(configuration: configuration)
     }
 
     /// Verify the effective access token, including agy's in-place refresh, independently of the ID-token claim.
@@ -209,16 +219,14 @@ enum AntigravityScopedAgyStaging {
         timeout: TimeInterval,
         dataLoader: (@Sendable (URLRequest) async throws -> (Data, URLResponse))?) async throws -> String?
     {
-        let accessToken = payload.token.accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !accessToken.isEmpty else { return nil }
+        guard let accessToken = payload.token.accessToken.trimmedNonEmpty else { return nil }
         var request = URLRequest(url: AntigravityOAuthConfig.userInfoURL)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = min(timeout, 15)
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = request.timeoutInterval
-        configuration.timeoutIntervalForResource = request.timeoutInterval
-        let session = ProviderHTTPClient.redirectGuardedSession(configuration: configuration)
-        defer { session.invalidateAndCancel() }
+        let session = Self.identitySession(timeout: request.timeoutInterval)
+        defer {
+            if request.timeoutInterval != 15 { session.invalidateAndCancel() }
+        }
         do {
             try Task.checkCancellation()
             let (data, response) = try await (dataLoader ?? { try await session.data(for: $0) })(request)
@@ -248,6 +256,7 @@ extension AntigravityCLIHTTPSFetchStrategy {
         binary: String,
         environment: [String: String],
         timeout: TimeInterval = 90,
+        versionResolver: AgyVersionResolver = AgyVersionResolver(),
         dataLoader: (@Sendable (URLRequest) async throws -> (Data, URLResponse))? = nil,
         credentialsUpdateHandler: (@Sendable (AntigravityOAuthCredentials) async throws -> Void)? = nil)
         async throws
@@ -269,7 +278,11 @@ extension AntigravityCLIHTTPSFetchStrategy {
             from: environment, home: staged.home)
 
         let parsed = try await Self.runPrintUsage(
-            binary: binary, environment: scopedEnvironment, directory: staged.home, timeout: timeout)
+            binary: binary,
+            environment: scopedEnvironment,
+            directory: staged.home,
+            timeout: timeout,
+            versionResolver: versionResolver)
         if let reportedEmail = AntigravityScopedAgyStaging.normalizedEmail(parsed.accountEmail),
            reportedEmail != AntigravityScopedAgyStaging.normalizedEmail(expectedAccountEmail)
         {

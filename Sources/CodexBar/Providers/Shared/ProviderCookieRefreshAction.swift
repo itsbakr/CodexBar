@@ -27,18 +27,19 @@ enum ProviderCookieRefreshAction {
     static func trailingText(
         provider: UsageProvider,
         cookieSource: ProviderCookieSource,
+        scope: CookieHeaderCache.Scope? = nil,
         context: ProviderSettingsContext) -> String?
     {
         guard cookieSource != .manual else { return nil }
         return context.statusText(self.statusID(provider)) ?? ProviderCookieSourceUI
-            .cachedTrailingText(provider: provider)
+            .cachedTrailingText(provider: provider, scope: scope)
     }
 
     static func refresh(
         provider: UsageProvider,
         operation: () async -> Bool) async -> Outcome
     {
-        await ProviderInteractionContext.$current.withValue(.userInitiated) {
+        await ProviderSettingsRefreshInteraction.perform {
             guard let gate = CookieHeaderCache.beginRefreshReadSuppression(provider: provider) else {
                 return .failed
             }
@@ -48,8 +49,7 @@ enum ProviderCookieRefreshAction {
             guard validated, !Task.isCancelled else { return .failed }
 
             let commit = CookieHeaderCache.commitRefreshReadSuppression(gate)
-            guard commit.stagedCount > 0,
-                  commit.committedCount == commit.stagedCount,
+            guard commit.committedCount == commit.stagedCount,
                   commit.failedCount == 0
             else { return .failed }
             return .refreshed

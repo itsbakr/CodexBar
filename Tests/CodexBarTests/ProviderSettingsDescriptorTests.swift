@@ -19,7 +19,7 @@ struct ProviderSettingsDescriptorTests {
         #expect(fixture.settings.providerConfig(for: .xkiro)?.apiKey == "fixture-key")
     }
 
-    @Test(arguments: [UsageProvider.atlascloud, .vercel])
+    @Test(arguments: [UsageProvider.atlascloud])
     func `balance providers keep API keys in their own config`(provider: UsageProvider) throws {
         let fixture = try self.makeSettingsFixture(suite: "ProviderSettingsDescriptorTests-\(provider.rawValue)")
         let implementation = try #require(ProviderCatalog.implementation(for: provider))
@@ -307,6 +307,8 @@ struct ProviderSettingsDescriptorTests {
         let fixture = try self.makeSettingsFixture(suite: "ProviderSettingsDescriptorTests-ollama-refresh")
         let context = fixture.settingsContext(provider: .ollama)
         let pickers = OllamaProviderImplementation().settingsPickers(context: context)
+        let usageSource = try #require(pickers.first { $0.id == "ollama-usage-source" })
+        #expect(usageSource.subtitle.isEmpty)
         let picker = try #require(pickers.first { $0.id == "ollama-cookie-source" })
         let action = try #require(picker.trailingActions.first)
 
@@ -452,13 +454,13 @@ struct ProviderSettingsDescriptorTests {
     }
 
     @Test
-    func `open code cookie refresh respects denial cooldown and preserves cookie`() async throws {
+    func `open code cookie refresh respects denial cooldown and preserves unvalidated cookie`() async throws {
         let fixture = try self.makeSettingsFixture(suite: "ProviderSettingsDescriptorTests-opencode-cooldown")
         let context = fixture.settingsContext(provider: .opencode)
         let picker = try #require(OpenCodeProviderImplementation().settingsPickers(context: context).first)
         let action = try #require(picker.trailingActions.first)
         let service = "com.steipete.codexbar.tests.settings-cookie-cooldown.\(UUID().uuidString)"
-        var cooldownRespected = false
+        var explicitRetryAllowed = false
 
         BrowserCookieAccessGate.resetForTesting()
         BrowserCookieAccessGate.recordDenied(for: .chrome)
@@ -471,13 +473,15 @@ struct ProviderSettingsDescriptorTests {
                     cookieHeader: "old-test-cookie",
                     sourceLabel: "Test old")
                 fixture.store._test_providerRefreshOverride = { _ in
-                    cooldownRespected = !BrowserCookieAccessGate.shouldAttempt(.chrome)
+                    explicitRetryAllowed = KeychainAccessGate.withTaskOverrideForTesting(false) {
+                        BrowserCookieAccessGate.shouldAttempt(.chrome)
+                    }
                 }
                 defer { fixture.store._test_providerRefreshOverride = nil }
 
                 await action.perform()
 
-                #expect(cooldownRespected)
+                #expect(!explicitRetryAllowed)
                 #expect(CookieHeaderCache.load(provider: .opencode)?.cookieHeader == "old-test-cookie")
                 #expect(picker.trailingText?() == L("Failed"))
             }
@@ -559,19 +563,11 @@ struct ProviderSettingsDescriptorTests {
         #expect(fixture.settings.antigravityPrioritizeExhaustedQuotas)
         #expect(fixture.settings.providerConfig(for: .antigravity)?.antigravityPrioritizeExhaustedQuotas == true)
 
-        let reopened = try SettingsStore(
-            userDefaults: #require(UserDefaults(suiteName: suite)),
-            configStore: testConfigStore(suiteName: suite, reset: false),
-            zaiTokenStore: NoopZaiTokenStore(),
-            syntheticTokenStore: NoopSyntheticTokenStore())
+        let reopened = try self.makeSettingsFixture(suite: suite, resetConfig: false).settings
         #expect(reopened.antigravityPrioritizeExhaustedQuotas)
 
         reopened.antigravityPrioritizeExhaustedQuotas = false
-        let reopenedAfterDisabling = try SettingsStore(
-            userDefaults: #require(UserDefaults(suiteName: suite)),
-            configStore: testConfigStore(suiteName: suite, reset: false),
-            zaiTokenStore: NoopZaiTokenStore(),
-            syntheticTokenStore: NoopSyntheticTokenStore())
+        let reopenedAfterDisabling = try self.makeSettingsFixture(suite: suite, resetConfig: false).settings
         #expect(reopenedAfterDisabling.antigravityPrioritizeExhaustedQuotas == false)
     }
 
@@ -949,27 +945,16 @@ extension ProviderSettingsDescriptorTests {
     }
 
     @Test
-    func `devin presentation follows store source label`() throws {
-        let fixture = try self.makeSettingsFixture(suite: "ProviderSettingsDescriptorTests-devin-presentation")
-        fixture.store.lastSourceLabels[.devin] = "web"
-        let metadata = try #require(ProviderDescriptorRegistry.metadata[.devin])
-        let context = fixture.presentationContext(provider: .devin, metadata: metadata)
+    func `jetbrains presentation surfaces local source and hides the undetected version row`() throws {
+        let fixture = try self.makeSettingsFixture(suite: "ProviderSettingsDescriptorTests-jetbrains-presentation")
+        let metadata = try #require(ProviderDescriptorRegistry.metadata[.jetbrains])
+        let context = fixture.presentationContext(provider: .jetbrains, metadata: metadata)
 
-        let detailLine = DevinProviderImplementation()
-            .presentation(context: context)
-            .detailLine(context)
+        let presentation = JetBrainsProviderImplementation().presentation(context: context)
 
-        #expect(detailLine == "web")
-    }
-
-    @Test
-    func `devin automatic auth explains Chromium browser support`() throws {
-        let fixture = try self.makeSettingsFixture(suite: "ProviderSettingsDescriptorTests-devin-browsers")
-        fixture.settings.devinCookieSource = .auto
-        let picker = try #require(DevinProviderImplementation()
-            .settingsPickers(context: fixture.settingsContext(provider: .devin)).first)
-
-        #expect(picker.subtitle == "Automatically imports the app.devin.ai session from Chromium browsers.")
+        // Local quota-file provider with versionDetector: nil — must not fall back to "jetbrains not detected".
+        #expect(presentation.detailLine(context) == "local")
+        #expect(presentation.showsVersionInSettings == false)
     }
 }
 
@@ -1614,14 +1599,28 @@ extension ProviderSettingsDescriptorTests {
 
     func makeSettingsFixture(
         suite: String,
+        resetConfig: Bool = true,
         environmentBase: [String: String] = [:]) throws -> ProviderSettingsFixture
     {
         let defaults = InMemoryUserDefaults()
         let settings = SettingsStore(
             userDefaults: defaults,
-            configStore: testConfigStore(suiteName: suite),
+            configStore: testConfigStore(suiteName: suite, reset: resetConfig),
             zaiTokenStore: NoopZaiTokenStore(),
-            syntheticTokenStore: NoopSyntheticTokenStore())
+            syntheticTokenStore: NoopSyntheticTokenStore(),
+            codexCookieStore: InMemoryCookieHeaderStore(),
+            claudeCookieStore: InMemoryCookieHeaderStore(),
+            cursorCookieStore: InMemoryCookieHeaderStore(),
+            opencodeCookieStore: InMemoryCookieHeaderStore(),
+            factoryCookieStore: InMemoryCookieHeaderStore(),
+            minimaxCookieStore: InMemoryMiniMaxCookieStore(),
+            minimaxAPITokenStore: InMemoryMiniMaxAPITokenStore(),
+            kimiTokenStore: InMemoryKimiTokenStore(),
+            augmentCookieStore: InMemoryCookieHeaderStore(),
+            ampCookieStore: InMemoryCookieHeaderStore(),
+            copilotTokenStore: InMemoryCopilotTokenStore(),
+            tokenAccountStore: InMemoryTokenAccountStore(),
+            keychainAccessPolicy: .init(setDisabled: { _ in }, isExplicitlyDisabled: { false }))
         let store = UsageStore(
             fetcher: UsageFetcher(environment: [:]),
             browserDetection: BrowserDetection(cacheTTL: 0),

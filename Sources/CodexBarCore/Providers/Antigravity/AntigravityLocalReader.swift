@@ -118,6 +118,26 @@ enum AntigravityLocalReader {
         "gemini-3.7-flash-safety-le": "gemini-3.7-flash",
     ]
 
+    /// `gpt-oss-120b` is an open-weight model, so no first-party vendor lists a price for it.
+    /// Google serves it inside Antigravity, so the Google Vertex list price applies. Antigravity
+    /// records it as `gpt-oss-120b-medium`, which the shared Claude pricing never routes to Vertex.
+    /// Only the exact recorded name is mapped, so other effort tiers stay unpriced.
+    private static let explicitCatalogEntries = [
+        "gpt-oss-120b-medium": (providerID: "google-vertex", modelID: "openai/gpt-oss-120b-maas"),
+    ]
+
+    /// Every catalog entry `costUSD` may price `model` with, so an unknown-price refresh fetches them all.
+    /// Antigravity prices through the Claude resolver, and its routing variants resolve against the
+    /// base vendor model, so both IDs are worth fetching, plus any explicit catalog entry.
+    static func pricingRefreshTargets(for model: String) -> [(providerID: String, modelID: String)] {
+        let names = [model] + [self.pricingBaseModelID(for: model)].compactMap(\.self)
+        var targets = names.flatMap { CostUsagePricing.claudeModelsDevPricingTargets(for: $0) }
+        if let entry = self.explicitCatalogEntries[model.lowercased()] {
+            targets.append(entry)
+        }
+        return targets
+    }
+
     static func checkedAdd(_ lhs: Int, _ rhs: Int) -> Int? {
         let (result, overflow) = lhs.addingReportingOverflow(rhs)
         return overflow ? nil : result
@@ -271,15 +291,16 @@ enum AntigravityLocalReader {
         let inherited = label.flatMap { conflicts.contains($0) ? nil : models[$0] }
         let model = self.normalizeModelID(event.turn.model ?? inherited ?? "unknown")
         let date = Date(timeIntervalSince1970: Double(timestamp) / 1000)
+        let day = CostUsageLocalDay.key(from: date, calendar: calendar)
+        let unattributedZero = total == 0 && model == "unknown"
         let cost = pricing.flatMap {
-            self.costUSD(
+            unattributedZero ? 0 : self.costUSD(
                 pricing: $0,
                 model: model,
                 date: date,
                 usage: usage,
                 cacheWrite: event.cacheWrite)
         }
-        let day = CostUsageLocalDay.key(from: date, calendar: calendar)
         return .init(
             date: day,
             inputTokens: input,
@@ -291,7 +312,7 @@ enum AntigravityLocalReader {
             requestCount: 1,
             costUSD: cost,
             modelsUsed: nil,
-            modelBreakdowns: [.init(
+            modelBreakdowns: unattributedZero ? [] : [.init(
                 modelName: model,
                 costUSD: cost,
                 totalTokens: total,
@@ -306,7 +327,8 @@ enum AntigravityLocalReader {
     }
 
     /// Prices the exact recorded model ID first so an explicitly catalogued variant keeps its own
-    /// price, then falls back to the base model of a known routing variant.
+    /// price, then falls back to the base model of a known routing variant, then to an explicit
+    /// catalog entry for a model that no first-party vendor prices.
     private static func costUSD(
         pricing: CostUsagePricing.ClaudeResolver,
         model: String,
@@ -314,9 +336,10 @@ enum AntigravityLocalReader {
         usage: AntigravityProtoReader.ParsedUsage,
         cacheWrite: Int) -> Double?
     {
-        func resolve(_ candidate: String) -> Double? {
+        func resolve(_ candidate: String, providerID: String? = nil) -> Double? {
             pricing.costUSD(
                 model: candidate,
+                providerID: providerID,
                 inputTokens: usage.newInput,
                 cacheReadInputTokens: usage.cacheRead,
                 cacheCreationInputTokens: cacheWrite,
@@ -324,8 +347,9 @@ enum AntigravityLocalReader {
                 pricingDate: date)
         }
         if let cost = resolve(model) { return cost }
-        guard let base = self.pricingBaseModelID(for: model) else { return nil }
-        return resolve(base)
+        if let base = self.pricingBaseModelID(for: model), let cost = resolve(base) { return cost }
+        guard let entry = self.explicitCatalogEntries[model.lowercased()] else { return nil }
+        return resolve(entry.modelID, providerID: entry.providerID)
     }
 
     private static func checkedMergeEntry(
@@ -428,11 +452,7 @@ enum AntigravityLocalReader {
     }
 
     private static func sumCosts(_ lhs: Double?, _ rhs: Double?) -> Double? {
-        switch (lhs, rhs) {
-        case let (lhs?, rhs?): lhs + rhs
-        case let (lhs?, nil): lhs
-        case let (nil, rhs?): rhs
-        case (nil, nil): nil
-        }
+        if let lhs, let rhs { return lhs + rhs }
+        return lhs ?? rhs
     }
 }

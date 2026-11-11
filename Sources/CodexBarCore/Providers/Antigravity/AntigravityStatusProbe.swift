@@ -62,8 +62,7 @@ private struct AntigravityModelVersion: Comparable {
     let minor: Int
 
     static func < (lhs: AntigravityModelVersion, rhs: AntigravityModelVersion) -> Bool {
-        if lhs.major != rhs.major { return lhs.major < rhs.major }
-        return lhs.minor < rhs.minor
+        (lhs.major, lhs.minor) < (rhs.major, rhs.minor)
     }
 }
 
@@ -205,10 +204,10 @@ public struct AntigravityStatusSnapshot: Sendable {
         }
 
         let primary = Self.quotaSummaryRepresentative(
-            matching: { $0.lowercased().contains("gemini") },
+            matching: .gemini,
             in: namedWindows)
         let secondary = Self.quotaSummaryRepresentative(
-            matching: { $0.lowercased().contains("claude") || $0.lowercased().contains("gpt") },
+            matching: .claudeGPT,
             in: namedWindows)
 
         let identity = ProviderIdentitySnapshot(
@@ -226,11 +225,23 @@ public struct AntigravityStatusSnapshot: Sendable {
     }
 
     private static func quotaSummaryRepresentative(
-        matching predicate: (String) -> Bool,
+        matching family: AntigravityQuotaFamilyVisibility.KnownFamily,
         in windows: [NamedRateWindow]) -> RateWindow?
     {
-        windows
-            .filter { $0.usageKnown && predicate($0.title) }
+        let known = windows.filter {
+            $0.usageKnown && AntigravityQuotaFamilyVisibility.knownFamily(windowID: $0.id, title: $0.title) == family
+        }
+        let ordinaryIDs = Set(Self.sessionCadenceAliases.union(["weekly"]).map {
+            Self.quotaSummaryWindowIDPrefix + "gemini-" + $0
+        })
+        let ordinary = known.filter { window in
+            var id = window.id.lowercased().replacingOccurrences(of: "_", with: "-")
+            if id.hasSuffix(" limit") {
+                id.removeLast(" limit".count)
+            }
+            return ordinaryIDs.contains(id)
+        }
+        return (ordinary.isEmpty ? known : ordinary)
             .max { lhs, rhs in
                 if lhs.window.usedPercent != rhs.window.usedPercent {
                     return lhs.window.usedPercent < rhs.window.usedPercent
@@ -241,25 +252,15 @@ public struct AntigravityStatusSnapshot: Sendable {
     }
 
     private static func quotaSummaryWindows(from quotaSummary: AntigravityQuotaSummary) -> [NamedRateWindow] {
-        let sortedGroups = quotaSummary.groups.enumerated().sorted { lhs, rhs in
-            let lhsRank = Self.quotaGroupSortRank(lhs.element)
-            let rhsRank = Self.quotaGroupSortRank(rhs.element)
-            if lhsRank != rhsRank {
-                return lhsRank < rhsRank
-            }
-            return lhs.offset < rhs.offset
-        }.map(\.element)
+        let sortedGroups = quotaSummary.groups.sorted {
+            Self.quotaGroupSortRank($0) < Self.quotaGroupSortRank($1)
+        }
 
         return sortedGroups.flatMap { group in
             let groupTitle = Self.displayTitle(forQuotaGroup: group)
-            let sortedBuckets = group.buckets.enumerated().sorted { lhs, rhs in
-                let lhsRank = Self.quotaBucketSortRank(lhs.element)
-                let rhsRank = Self.quotaBucketSortRank(rhs.element)
-                if lhsRank != rhsRank {
-                    return lhsRank < rhsRank
-                }
-                return lhs.offset < rhs.offset
-            }.map(\.element)
+            let sortedBuckets = group.buckets.sorted {
+                Self.quotaBucketSortRank($0) < Self.quotaBucketSortRank($1)
+            }
 
             return sortedBuckets.map { bucket in
                 let bucketTitle = Self.displayTitle(forQuotaBucket: bucket)
@@ -271,7 +272,7 @@ public struct AntigravityStatusSnapshot: Sendable {
                     resetsAt: bucket.resetTime,
                     resetDescription: bucket.resetDescription)
                 return NamedRateWindow(
-                    id: Self.quotaSummaryWindowID(for: bucket),
+                    id: Self.quotaSummaryWindowIDPrefix + bucket.bucketId,
                     title: "\(groupTitle) \(bucketTitle)",
                     window: window,
                     usageKnown: !bucket.disabled && bucket.remainingFraction != nil)
@@ -285,10 +286,6 @@ public struct AntigravityStatusSnapshot: Sendable {
 
     private static let quotaSummaryWindowIDPrefix = "antigravity-quota-summary-"
 
-    private static func quotaSummaryWindowID(for bucket: AntigravityQuotaSummaryBucket) -> String {
-        self.quotaSummaryWindowIDPrefix + bucket.bucketId
-    }
-
     private static func remainingPercent(from remainingFraction: Double?) -> Double? {
         guard let remainingFraction else { return nil }
         return max(0, min(100, remainingFraction * 100))
@@ -297,7 +294,8 @@ public struct AntigravityStatusSnapshot: Sendable {
     private static func displayTitle(forQuotaGroup group: AntigravityQuotaSummaryGroup) -> String {
         let title = group.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         let lowercasedTitle = title.lowercased()
-        if lowercasedTitle.contains("gemini") {
+        // A versioned group such as "Gemini 4 Argon" is a separate quota; keep its own name.
+        if lowercasedTitle.contains("gemini"), !title.contains(where: \.isNumber) {
             return "Gemini"
         }
         if lowercasedTitle.contains("claude") || lowercasedTitle.contains("gpt") {
@@ -877,7 +875,7 @@ public struct AntigravityStatusProbe: Sendable {
     public func fetch(matchingAccountEmail expectedAccountEmail: String? = nil) async throws
         -> AntigravityStatusSnapshot
     {
-        let deadline = Date().addingTimeInterval(self.timeout)
+        let deadline = Self.deadlineNow().addingTimeInterval(self.timeout)
         let processInfos = try await Self.detectProcessInfos(timeout: self.timeout, scope: self.processScope)
         let result = try await Self.fetchProcessSnapshots(processInfos: processInfos) { processInfo in
             try await Self.fetch(
@@ -1463,7 +1461,7 @@ public struct AntigravityStatusProbe: Sendable {
         remainingAttemptCount: Int) -> TimeInterval?
     {
         guard let deadline else { return timeout }
-        let remaining = deadline.timeIntervalSinceNow
+        let remaining = deadline.timeIntervalSince(Self.deadlineNow())
         guard remaining > 0 else { return nil }
         return min(timeout, remaining / Double(max(1, remainingAttemptCount)))
     }
@@ -1585,7 +1583,7 @@ public struct AntigravityStatusProbe: Sendable {
                 payload: RequestPayload(
                     path: self.quotaSummaryPath,
                     body: ["forceRefresh": true]),
-                context: self.quotaSummaryRequestContext(from: context),
+                context: self.fallbackReservingRequestContext(from: context),
                 send: send,
                 parse: self.parseQuotaSummaryResponse)
             guard quotaSummary.hasKnownQuotaSummary else {
@@ -1610,7 +1608,7 @@ public struct AntigravityStatusProbe: Sendable {
                 payload: RequestPayload(
                     path: self.getUserStatusPath,
                     body: self.defaultRequestBody()),
-                context: self.legacyUserStatusRequestContext(from: context),
+                context: self.fallbackReservingRequestContext(from: context),
                 send: send,
                 parse: self.parseUserStatusResponse)
         } catch {
@@ -1624,24 +1622,14 @@ public struct AntigravityStatusProbe: Sendable {
         }
     }
 
-    private static func legacyUserStatusRequestContext(from context: RequestContext) -> RequestContext {
+    private static func fallbackReservingRequestContext(from context: RequestContext) -> RequestContext {
         guard let deadline = context.deadline else { return context }
-        let remaining = max(0, deadline.timeIntervalSinceNow)
-        let userStatusBudget = remaining / 2
+        let remaining = max(0, deadline.timeIntervalSince(Self.deadlineNow()))
+        let attemptBudget = remaining / 2
         return RequestContext(
             endpoints: context.endpoints,
-            timeout: min(context.timeout, userStatusBudget),
-            deadline: Date().addingTimeInterval(userStatusBudget))
-    }
-
-    private static func quotaSummaryRequestContext(from context: RequestContext) -> RequestContext {
-        guard let deadline = context.deadline else { return context }
-        let remaining = max(0, deadline.timeIntervalSinceNow)
-        let quotaSummaryBudget = remaining / 2
-        return RequestContext(
-            endpoints: context.endpoints,
-            timeout: min(context.timeout, quotaSummaryBudget),
-            deadline: Date().addingTimeInterval(quotaSummaryBudget))
+            timeout: min(context.timeout, attemptBudget),
+            deadline: Self.deadlineNow().addingTimeInterval(attemptBudget))
     }
 
     private static func identityRequestContext(from context: RequestContext) -> RequestContext {

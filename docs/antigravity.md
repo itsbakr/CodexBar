@@ -25,6 +25,13 @@ CodexBar keeps the signed-in `agy` local HTTPS server alive briefly
 after each refresh and stops it when idle, or reuses a signed-in `agy` you already have running
 without taking ownership of that process.
 
+Every CodexBar-owned `agy` child (version checks, ambient or account-scoped print reports, and managed PTY sessions)
+receives `AGY_CLI_DISABLE_AUTO_UPDATE=true`, preventing passive quota probes from starting CLI auto-updates.
+The lowercase literal `true` is required: upstream reports show that `1` is ignored
+([updater behavior](https://github.com/google-antigravity/antigravity-cli/issues/942),
+[macOS print-mode evidence](https://github.com/google-antigravity/antigravity-cli/issues/1046)).
+This per-child override leaves user-launched terminal sessions and saved updater settings unchanged.
+
 The menu bar also reuses an already-running, same-user `agy` that matches the resolved executable;
 this does not require the desktop app or a saved Google account in CodexBar. Selected accounts still
 require matching identity. CLI quota refresh and **Add Account...** are separate: starting a new OAuth
@@ -34,13 +41,26 @@ login still needs the app's OAuth client or the explicit client environment over
 expose the generated token (1.1.28, 1.2.0, and 1.2.1 answer the same request with `200`). When the selected
 executable reports 1.2.2 or later, CodexBar still spends its bounded warm-reuse check but does not spawn a
 managed session or wait for its readiness deadline. Unknown versions keep the managed spawn.
+The legacy gate and ambient or account-scoped print fallback share one `agy --version` result per refresh,
+including unknown versions and probe failures. A known version is also reused across refreshes in the same
+CodexBar process while the resolved executable's path, size, modification time, and file identity are unchanged.
+Only the most recently used executable is retained; no account or usage data is cached with it. Unknown versions
+and failures are retried on the next refresh. Successful warm reuse needs no version subprocess. On the
+CSRF-gated fallback, later refreshes launch only the usage report; a new CLI process still checks the version.
 
 For `agy` 1.2.2 and later, a failed legacy HTTPS fetch can fall back to
 `agy -p /usage --output-format json`. CodexBar checks that the same executable reports version 1.1.11
 or later before using print mode; [Google introduced non-interactive usage reports in 1.1.11](https://antigravity.google/changelog).
 It requires a successful `usage` command report with known,
 enabled quota buckets, bounds the command to 90 seconds and its output to 1 MiB, and terminates the command
-on cancellation. It runs in a private empty directory and does not send a model prompt or parse TUI output.
+on cancellation. It runs in a private temporary directory and does not send a model prompt or parse TUI output.
+When silent sign-in fails, `agy` print mode can exec `open` or `xdg-open` from `PATH` to start Google OAuth.
+Each print probe puts failing launchers in its existing private directory, prepends that directory to `PATH`,
+and points `BROWSER` at the failing launcher. If the launchers cannot be installed, the report does not start.
+Automatic and manual usage refreshes can still retrieve quota with a working login, but cannot open browser
+sign-in through these launchers. A failed login returns a sign-in or timeout error; run `agy` in a terminal
+to sign in again. **Add Account...** keeps its explicit OAuth login flow. The launchers are removed with the
+probe directory after subprocess cleanup, including failure and cancellation.
 Each print probe receives a fresh `CODEXBAR_PROBE_OWNER` environment marker. On completion, timeout, or
 cancellation, CodexBar stops its process group and reaps same-user processes that still carry that exact marker,
 including detached MCP servers. Ownership and process start identity are checked again before each signal;
@@ -55,7 +75,7 @@ On macOS, Auto can also run the print command for a selected or injected Google 
 its credentials into a temporary `0700` home with a `0600` token file, then runs `agy` with only PATH,
 locale, temporary-directory, and proxy settings inherited. `SSH_TTY` selects agy's file-token storage,
 keeping the ambient CLI login and Keychain untouched. Credentials without an ID token are supported;
-`agy` can refresh an expired grant in that temporary home without starting a login.
+`agy` can silently refresh an expired grant in that temporary home; if that fails, the same browser-launch guard applies.
 
 Before attributing usage, CodexBar checks the effective access token through Google's userinfo endpoint
 and rejects a different or unverifiable account, including conflicting refreshed ID-token claims.
@@ -68,6 +88,8 @@ fallback; cancellation stops the pipeline. Linux keeps its existing OAuth fallba
 
 Scoped runs share the ambient runner's three-second version check, 90-second command limit, 1 MiB output
 limit, and descendant cleanup. Identity verification has a 15-second request and resource deadline.
+Checks with the full 15-second budget reuse a connection pool without cookie, credential, or response storage;
+checks with less time remaining use a private session with that shorter resource deadline.
 The existing menu account model caps a refresh at six accounts; CLI `--all-accounts` refreshes sequentially.
 Grouped weekly-only Starter quotas use the same parser as the other sources.
 
@@ -88,6 +110,12 @@ Antigravity supports four usage data sources:
 4. Google OAuth-backed remote usage (explicit OAuth mode, and the account-scoped fallback used for multi-account switching). The OAuth path can store multiple Google accounts through the shared token-account switcher.
 
 ## When the Antigravity app is closed
+
+OAuth Cloud Code requests use the fixed compatibility identity
+`antigravity/hub/2.9.1 <darwin|linux>/<arm64|amd64>`. The shared request builder applies it to
+account setup, quota summaries, and legacy model/quota fallbacks for shared and selected Google accounts,
+including the OAuth fallback after a scoped `agy` run. The external `agy` process owns its own quota requests;
+the scoped ephemeral HTTP session in CodexBar verifies identity through Google's userinfo endpoint.
 
 The app-local `language_server` exists only while Antigravity.app is running. With the app closed,
 CodexBar relies on the `agy` CLI HTTPS source or the Google OAuth fallback. Without a signed-in
@@ -110,7 +138,9 @@ Starter accounts can supply only weekly limits. Both weekly groups remain visibl
 inventing five-hour allowances. OAuth first tries `retrieveUserQuotaSummary` with the selected account's
 project and a two-second timeout cap. Unavailable, legacy model-bucket, or unmeasured summary responses fall
 back to the existing model endpoints; authentication failures and cancellation still propagate. Grouped OAuth
-quotas retain that account's existing email and plan, without an additional identity request.
+quotas retain that account's existing email, without an additional identity request. OAuth prefers an explicit
+paid tier over the generic Cloud Code tier. If no paid plan is identified, a measured, enabled five-hour
+quota suppresses a contradictory `Free` label; weekly-only Starter quotas keep their existing plan label.
 
 Older local payloads may only include raw Claude, GPT-OSS, Gemini tiers, account plan, and session reset timestamps.
 Current Antigravity IDE local endpoints return `GetUserStatus`, `GetAvailableModels`, and `GetCascadeModelConfigData`
@@ -135,6 +165,9 @@ be polled within the readiness deadline.
 
 - OAuth refresh form-encodes credential values, preserving literal plus signs, separators, and percent escapes.
 - Login still uses Antigravity's Google OAuth client, discovered from `Antigravity.app` or overridden with `ANTIGRAVITY_OAUTH_CLIENT_ID` and `ANTIGRAVITY_OAUTH_CLIENT_SECRET`.
+- Discovery reads the ID and secret initialized together in the language server's OAuth configuration. Antigravity 2.19.1 on Apple Silicon and Intel stores two clients in separately pooled strings; their order does not identify a pair. Among recognized records, CodexBar prefers the client used by agy's consumer sign-in, then falls back to the first matched record. Older artifacts with a single pair remain supported; ambiguous artifacts without a recognized record are rejected.
+- Accounts previously signed in with the other client may receive `GOOGLE_TOS_NOT_SUPPORTED_BY_CLIENT` with no current tier or project. Without a saved project, CodexBar asks you to sign in again instead of displaying placeholder 100% quotas. Refresh tokens remain bound to their original client; discovery does not migrate an existing grant. The Hub request User-Agent is independent of this OAuth client selection.
+- If discovery fails or Google rejects the client with `invalid_client`, update Antigravity or set both overrides to a matching client ID and secret before retrying. These failures do not add or replace a saved account.
 - A successful login writes the latest shared credentials to `~/.codexbar/antigravity/oauth_creds.json` and upserts a token-account entry for the Google account.
 - Each token-account entry stores serialized `AntigravityOAuthCredentials` and is injected into remote fetches through `ANTIGRAVITY_OAUTH_CREDENTIALS_JSON`.
 - When a token account is selected, the OAuth fetcher uses that account before falling back to the shared credentials file.
@@ -153,7 +186,7 @@ be polled within the readiness deadline.
 - `POST https://cloudcode-pa.googleapis.com/v1internal:onboardUser`
 - `POST https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels`
 - `POST https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota`
-- `POST https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary` (preferred when it returns measured
+- `POST https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary` (preferred when it returns measured
   groups; older model-bucket responses use the model-endpoint fallback)
 
 ## Data sources + fallback order
@@ -287,6 +320,11 @@ shared OAuth file can still be used as a fallback credential source.
   - `ideVersion: unknown`
 
 ## Parsing and model mapping
+
+Versioned Gemini quota groups retain the name supplied by the usage response. For example, a separate
+Gemini 4 Argon group is shown as **Gemini 4 Argon weekly**, alongside the ordinary **Gemini weekly** quota.
+Quota values, account ownership, and family selection remain unchanged.
+
 - Preferred source fields:
   - `response.groups[].displayName`
   - `response.groups[].buckets[].bucketId`
@@ -305,15 +343,20 @@ shared OAuth file can still be used as a fallback credential source.
   - `Gemini` groups Gemini Pro and Gemini Flash text models.
   - `Claude + GPT` groups Claude text models and GPT/GPT-OSS text models.
 - Representative selection:
+  - Quota summaries prefer measured ordinary Gemini buckets (`gemini-5h` and `gemini-weekly`, including supported
+    cadence aliases) over model-specific Gemini allowances. Stable bucket IDs determine this preference independently
+    of display labels. Model-specific quotas remain the fallback when ordinary quota is absent, unknown, or disabled.
+    Every returned bucket retains its percentage and reset metadata in `extraRateWindows`.
   - Hidden model rows such as Lite, autocomplete, and image variants do not drive summary bars.
-  - For each group, CodexBar uses the lowest remaining known quota row and preserves that row's reset metadata.
+  - For each group, CodexBar uses the lowest remaining known candidate and preserves that row's reset metadata.
   - Rows with reset metadata but no remaining fraction stay visible as unavailable reset context only when their group
     has no known usage row.
 - `resetTime` parsing:
   - ISO-8601 preferred; numeric epoch seconds as fallback.
 - Identity:
   - Local HTTPS merges email and plan from the same server's `GetUserStatus`; print reports supply neither.
-  - OAuth retains the selected account's existing email claims and `loadCodeAssist` plan when parsing grouped quotas.
+  - OAuth retains the selected account's email claims and resolves the plan from `loadCodeAssist`, preferring
+    `paidTier` over generic tier metadata. Measured five-hour quotas never carry a contradictory `Free` label.
 
 ## UI mapping
 - Provider metadata:
@@ -347,7 +390,7 @@ shared OAuth file can still be used as a fallback credential source.
   `idle` instead. The `codexbar serve` web UI skips those rows, so the web card matches the menu without repeating
   the family rule in JavaScript. See `docs/dashboard-api.md`.
 - CLI text and `cards` render quota-summary buckets once, using the same idle-family visibility rule. Missing or disabled quota stays unavailable, including in brief cards, while reset context remains visible. Raw JSON retains every bucket.
-- Linux and Omarchy list each measured quota-summary bucket once with its family title. The most constrained bucket in each family stays first for the tray meters; notification history follows the bucket when its position changes.
+- Linux and Omarchy list each measured quota-summary bucket once with its family title. Each family's selected representative stays first for the tray meters; stable bucket IDs preserve row and notification identity when titles change or quota values match.
 
 ## Quota observation history
 
@@ -369,7 +412,35 @@ recorded breakdown names. See [model pricing](model-pricing.md) for the supporte
 
 Local history reads only the existing recognized roots: `~/.gemini/antigravity-cli/conversations/*.db`,
 `~/.gemini/antigravity/*.db`, and `~/.gemini/antigravity/conversations/*.db`. `GEMINI_CLI_HOME` replaces
-`~/.gemini`. When SQLite discovery completes without any databases, the reader can use
+`~/.gemini` as the primary home. **Settings → Providers → Antigravity → Additional Gemini profile homes**
+lets you opt in to other homes with a folder picker and remove them individually. Select each profile's
+Gemini directory (usually its `.gemini` directory), not its parent HOME or its `conversations` directory.
+The CLI reads the same `antigravityAdditionalProfileHomes` array from the Antigravity provider entry in
+`~/.codexbar/config.json` (or `CODEXBAR_CONFIG`):
+
+```json
+{
+  "version": 1,
+  "providers": [{
+    "id": "antigravity",
+    "enabled": true,
+    "antigravityAdditionalProfileHomes": ["/path/to/profile/home/.gemini"]
+  }]
+}
+```
+
+Use absolute paths or `~/…` relative to the refresh environment's HOME. An empty or omitted list keeps
+single-home behavior. Each selected home contributes the same three recognized directories; CodexBar never
+discovers additional homes from running processes or by traversing unrelated directories. Duplicate paths
+(including symlink aliases) are scanned once. Copied databases retaining their conversation filename are
+deduplicated by conversation and row/request identity; distinct conversations remain separate. Conflicting
+copies remain unpublishable rather than choosing an arbitrary token count. Empty and relative entries are ignored.
+Missing homes contribute no history. Unreadable roots or roots that are files retain the existing partial-history
+handling. The same scan budgets
+apply across all homes. Changing the home set invalidates menu and dashboard history caches.
+
+These homes affect local token/cost history only, not login, quota queries, or account attribution.
+When SQLite discovery across all selected homes completes without any databases, the reader can use
 `~/.config/tokscale/antigravity-cache/sessions/*.jsonl`; `TOKSCALE_CONFIG_DIR` replaces `~/.config/tokscale`.
 Both overrides and `HOME` come from the same refresh environment. Declared roots and session files may be symlinks;
 discovery still visits only the immediate entries of the recognized directories. This is machine-local token history,
@@ -380,7 +451,10 @@ affected models unpriced rather than failing the scan.
 
 Use `codexbar cost --provider antigravity --format json` to read this same local history from the CLI.
 The cost endpoint and dashboard also include it when Antigravity is selected. Known models receive local token ×
-public API-price estimates from the pricing catalog. Unknown models stay unpriced. These figures are not Antigravity
+public API-price estimates from the pricing catalog. Unknown models with tokens stay unpriced.
+Requests with no model and zero tokens still count for the day but add no model row. With pricing enabled,
+they count as estimated at $0; without pricing, their cost remains absent. Named zero-token rows are unchanged. A model-less zero-token day does not hide
+named unpriced model rows from other days. These figures are not Antigravity
 charges or credit deductions, and these entry points do not expand the supported timestamp layouts described below.
 Local reads use cached or built-in prices first. Routine catalog updates run in the background; `codexbar cost --provider antigravity --refresh` may wait for a bounded pricing refresh when a recorded model has no known rate. Empty or absent history never starts a pricing download. Historical requests use prices applicable to their event timestamps.
 
@@ -459,8 +533,8 @@ generation from the producer's fallback. Identical session/line
 copies deduplicate, while contradictory copies remain partial.
 
 One cancellable job on `CostUsageScanExecutor` owns discovery, SQL, decoding, and fallback. Limits are 500 files,
-10,000 directory entries, 10,000 rows per file, 50,000 rows overall, 16 MiB per record, 64 MiB per file,
-128 MiB of attempted payload bytes overall, and a five-second cooperative scan deadline. Rejected rows consume the budget;
+10,000 directory entries, 10,000 rows per file, 100,000 rows overall, 16 MiB per record, 64 MiB per file,
+512 MiB of attempted payload bytes overall, and a 30-second cooperative scan deadline. Rejected rows consume the budget;
 exactly 500 complete databases are accepted. Discovery is incremental and JSONL is read in bounded chunks.
 Schema inspection bounds each catalogue walk to 128 entries and each table to 64 columns (one additional row detects
 truncation), with a shared 64 KiB allowance per database for inspected schema text and the same cooperative deadline/cancellation.

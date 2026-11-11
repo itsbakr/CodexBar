@@ -7,7 +7,53 @@ import Darwin
 import Glibc
 #endif
 
+private actor SpawnCounter {
+    private(set) var count = 0
+
+    func record() {
+        self.count += 1
+    }
+}
+
 extension AntigravityCLIHTTPSFetchStrategyTests {
+    @Test
+    func `unchanged agy executable reuses its version across refreshes and rechecks replacements`() async throws {
+        let fixture = try Self.printExecutable("exit 0", version: "1.2.2")
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let versionCache = AntigravityCLIHTTPSFetchStrategy.AgyVersionCache()
+        for _ in 0..<3 {
+            let version = try await AntigravityCLIHTTPSFetchStrategy.agyVersion(
+                binary: fixture.binary.path,
+                environment: fixture.environment,
+                versionCache: versionCache)
+            #expect(version?.0 == 1 && version?.1 == 2 && version?.2 == 2)
+        }
+        #expect(Self.versionCallCount(in: fixture.directory) == 1)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 1000)],
+            ofItemAtPath: fixture.binary.path)
+        _ = try await AntigravityCLIHTTPSFetchStrategy.agyVersion(
+            binary: fixture.binary.path,
+            environment: fixture.environment,
+            versionCache: versionCache)
+        #expect(Self.versionCallCount(in: fixture.directory) == 2)
+        let replacement = try Data(contentsOf: fixture.binary)
+        try replacement.write(to: fixture.binary, options: .atomic)
+        try "1.2.3".write(
+            to: fixture.directory.appendingPathComponent("version"),
+            atomically: true,
+            encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 1000), .posixPermissions: 0o700],
+            ofItemAtPath: fixture.binary.path)
+        let updated = try await AntigravityCLIHTTPSFetchStrategy.agyVersion(
+            binary: fixture.binary.path,
+            environment: fixture.environment,
+            versionCache: versionCache)
+        #expect(updated?.2 == 3)
+        #expect(Self.versionCallCount(in: fixture.directory) == 3)
+    }
+
     @Test
     func `CLI report parses structured quotas`() throws {
         let json = """
@@ -84,6 +130,50 @@ extension AntigravityCLIHTTPSFetchStrategyTests {
         #expect(usage.primary != nil)
         #expect(usage.secondary != nil)
         #expect(usage.extraRateWindows?.count == 4)
+    }
+
+    @Test
+    func `CLI report keeps a model-specific Gemini group name`() throws {
+        let json = """
+        {
+          "status": "SUCCESS",
+          "command": {
+            "name": "usage",
+            "data": {
+              "groups": [
+                {
+                  "name": "Gemini Models",
+                  "buckets": [
+                    {
+                      "id": "gemini-weekly",
+                      "name": "Weekly Limit Remaining",
+                      "window": "weekly",
+                      "remaining_fraction": 0.99
+                    }
+                  ]
+                },
+                {
+                  "name": "Gemini 4 Argon",
+                  "description": "For paid Pro plans, Argon quota is separate.",
+                  "buckets": [
+                    {
+                      "id": "gemini-argon-wtu-weekly",
+                      "name": "Gemini 4 Argon Weekly Limit",
+                      "window": "weekly",
+                      "remaining_fraction": 0.53,
+                      "reset_time": "2026-10-23T10:24:14Z"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+        """
+
+        let usage = try AntigravityStatusProbe.parseCLIUsageReport(Data(json.utf8)).toUsageSnapshot()
+
+        #expect(usage.extraRateWindows?.map(\.title) == ["Gemini weekly", "Gemini 4 Argon weekly"])
     }
 
     @Test(arguments: ["ERROR", "PENDING", "success"])
@@ -181,6 +271,67 @@ extension AntigravityCLIHTTPSFetchStrategyTests {
                     throw AntigravityStatusProbeError.notRunning
                 })
         }
+    }
+
+    @Test
+    func `version and ambient print disable auto update`() async throws {
+        let fixture = try Self.printExecutable("""
+        printf '%s:%s\\n' "$1" "${AGY_CLI_DISABLE_AUTO_UPDATE:-missing}" >> "$HOME/update-guards"
+        if [ "$1" = --version ]; then echo 1.2.2; exit 0; fi
+        /bin/cat <<'REPORT'
+        \(Self.reportJSON())
+        REPORT
+        """, version: nil)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        var environment = fixture.environment
+        environment["AGY_CLI_DISABLE_AUTO_UPDATE"] = "false"
+
+        _ = try await AntigravityCLIHTTPSFetchStrategy().fetchPrintUsage(
+            binary: fixture.binary.path, environment: environment)
+
+        let guards = try String(contentsOf: fixture.directory.appendingPathComponent("update-guards"), encoding: .utf8)
+        #expect(guards == "--version:true\n-p:true\n")
+    }
+
+    @Test
+    func `print usage cannot launch the system browser`() async throws {
+        // agy's OAuth launcher uses exec.Command("open", url), resolved through PATH.
+        // The fallback launchers only write a marker, so the red test cannot open a browser.
+        let fixture = try Self.printExecutable("""
+        for name in open xdg-open; do
+          launcher=$(command -v "$name")
+          case "$launcher" in
+            "$HOME/$name"|*/codexbar-agy-usage-*/"$name") ;;
+            *) exit 30 ;;
+          esac
+          "$launcher" https://example.invalid/oauth || true
+        done
+        command -v open > "$HOME/open-path"
+        "$BROWSER" https://example.invalid/oauth || true
+        echo "Authentication required. Please visit the URL to log in:" >&2
+        exit 1
+        """)
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        for name in ["open", "xdg-open", "browser"] {
+            let launcher = fixture.directory.appendingPathComponent(name)
+            try "#!/bin/sh\necho invoked >> \"$HOME/browser-invoked\"\nexit 1\n"
+                .write(to: launcher, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: launcher.path)
+        }
+        var environment = fixture.environment
+        environment["PATH"] = fixture.directory.path + ":/usr/bin:/bin"
+        environment["BROWSER"] = fixture.directory.appendingPathComponent("browser").path
+        await ProviderInteractionContext.$current.withValue(.background) {
+            await #expect(throws: AntigravityStatusProbeError.authenticationRequired) {
+                try await AntigravityCLIHTTPSFetchStrategy().fetchPrintUsage(
+                    binary: fixture.binary.path, environment: environment)
+            }
+        }
+        #expect(!FileManager.default
+            .fileExists(atPath: fixture.directory.appendingPathComponent("browser-invoked").path))
+        let openPath = try String(contentsOf: fixture.directory.appendingPathComponent("open-path"), encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(!FileManager.default.fileExists(atPath: openPath))
     }
 
     @Test(arguments: ["1.1.11", "1.2.2", "2.0.0"])
@@ -356,9 +507,14 @@ extension AntigravityCLIHTTPSFetchStrategyTests {
         ("1.2.2-preview", true),
         ("", true),
     ])
-    func `only CSRF gated agy versions skip the managed spawn`(version: String, spawns: Bool) {
+    func `only CSRF gated agy versions skip the managed spawn`(version: String, spawns: Bool) async {
         let parsed = AntigravityCLIHTTPSFetchStrategy.parseVersion(version)
-        #expect(AntigravityCLIHTTPSFetchStrategy.spawnCanReachLocalServer(version: parsed) == spawns)
+        let counter = SpawnCounter()
+        _ = try? await AntigravityCLIHTTPSFetchStrategy.fetchBySpawningIfReachable(version: parsed) {
+            await counter.record()
+            throw AntigravityStatusProbeError.notRunning
+        }
+        #expect(await counter.count == (spawns ? 1 : 0))
     }
 
     @Test
@@ -422,6 +578,104 @@ extension AntigravityCLIHTTPSFetchStrategyTests {
                 return expected
             })
         #expect(result.sourceLabel == "fixture-spawn")
+    }
+
+    @Test
+    func `CSRF gated CLI fetch resolves the agy version once`() async throws {
+        let report = try Self.reportJSON()
+        let fixture = try Self.printExecutable("""
+        if [ "${1:-}" != -p ]; then exit 9; fi
+        /bin/cat <<'REPORT'
+        \(report)
+        REPORT
+        """, version: "1.2.2")
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let context = self.makeFetchContext(sourceMode: .cli, env: fixture.environment)
+        for _ in 0..<2 {
+            _ = try await AntigravityCLIHTTPSFetchStrategy().fetch(
+                context,
+                warmDependencies: Self.noWarmSession(),
+                spawnFetch: { _, _, _, _ in throw AntigravityStatusProbeError.timedOut })
+        }
+        // Other parallel fixtures can evict the shared single-binary cache between these fetches.
+        #expect((1...2).contains(Self.versionCallCount(in: fixture.directory)))
+    }
+
+    @Test
+    func `unknown agy version is resolved once and still fails the print guard`() async throws {
+        let fixture = try Self.printExecutable("touch \"$HOME/unexpected-print\"; exit 9", version: "")
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let spawns = SpawnCounter()
+        await #expect(throws: AntigravityStatusProbeError
+            .parseFailed("CLI usage reports require agy 1.1.11 or later"))
+        {
+            try await AntigravityCLIHTTPSFetchStrategy().fetch(
+                self.makeFetchContext(sourceMode: .cli, env: fixture.environment),
+                warmDependencies: Self.noWarmSession(),
+                spawnFetch: { _, _, _, _ in
+                    await spawns.record()
+                    throw AntigravityStatusProbeError.apiError("spawn failed")
+                })
+        }
+        #expect(await spawns.count == 1)
+        #expect(Self.versionCallCount(in: fixture.directory) == 1)
+        #expect(!FileManager.default
+            .fileExists(atPath: fixture.directory.appendingPathComponent("unexpected-print").path))
+    }
+
+    @Test
+    func `shared resolver serves the legacy gate and the print report from one run`() async throws {
+        let report = try Self.reportJSON()
+        let fixture = try Self.printExecutable("""
+        if [ "${1:-}" != -p ]; then exit 9; fi
+        /bin/cat <<'REPORT'
+        \(report)
+        REPORT
+        """, version: "1.2.2")
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let resolver = AntigravityCLIHTTPSFetchStrategy.AgyVersionResolver()
+        let gate = try await AntigravityCLIHTTPSFetchStrategy.agyVersion(
+            binary: fixture.binary.path, environment: fixture.environment, resolver: resolver)
+        #expect(gate?.0 == 1 && gate?.1 == 2 && gate?.2 == 2)
+        let snapshot = try await AntigravityCLIHTTPSFetchStrategy.runPrintUsage(
+            binary: fixture.binary.path,
+            environment: fixture.environment,
+            directory: fixture.directory,
+            timeout: 10,
+            versionResolver: resolver)
+        let usage = try snapshot.toUsageSnapshot()
+        #expect(abs((usage.primary?.usedPercent ?? -1) - 40) < 0.001)
+        #expect(Self.versionCallCount(in: fixture.directory) == 1)
+    }
+
+    @Test
+    func `version resolver replays a probe failure to the print report`() async throws {
+        let fixture = try Self.printExecutable("exit 9", version: "1.2.2")
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let resolver = AntigravityCLIHTTPSFetchStrategy.AgyVersionResolver()
+        let missing = fixture.directory.appendingPathComponent("missing-agy").path
+        let gate = try? await AntigravityCLIHTTPSFetchStrategy.agyVersion(
+            binary: missing, environment: fixture.environment, resolver: resolver)
+        #expect(gate == nil)
+        await #expect(throws: AntigravityStatusProbeError.cliReportFailed(.executableNotFound)) {
+            try await AntigravityCLIHTTPSFetchStrategy.runPrintUsage(
+                binary: fixture.binary.path,
+                environment: fixture.environment,
+                directory: fixture.directory,
+                timeout: 10,
+                versionResolver: resolver)
+        }
+        #expect(Self.versionCallCount(in: fixture.directory) == 0)
+    }
+
+    @Test
+    func `version resolver does not cache cancellation`() async throws {
+        let resolver = AntigravityCLIHTTPSFetchStrategy.AgyVersionResolver()
+        await #expect(throws: CancellationError.self) {
+            try await resolver.resolve { throw CancellationError() }
+        }
+        let version = try await resolver.resolve { (1, 2, 2) }
+        #expect(version?.0 == 1 && version?.1 == 2 && version?.2 == 2)
     }
 
     @Test(arguments: [false, true])
@@ -488,6 +742,11 @@ extension AntigravityCLIHTTPSFetchStrategyTests {
             })
     }
 
+    private static func versionCallCount(in directory: URL) -> Int {
+        let text = (try? String(contentsOf: directory.appendingPathComponent("version-calls"), encoding: .utf8)) ?? ""
+        return text.split(separator: "\n").count
+    }
+
     private static func expectPrintProcessExited(in directory: URL) throws {
         let text = try String(contentsOf: directory.appendingPathComponent("pid"), encoding: .utf8)
         let pid = try #require(Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)))
@@ -502,7 +761,8 @@ extension AntigravityCLIHTTPSFetchStrategyTests {
         var script = "#!/bin/sh\nset -eu\n"
         if let version {
             try version.write(to: directory.appendingPathComponent("version"), atomically: true, encoding: .utf8)
-            script += "if [ \"${1:-}\" = --version ]; then exec /bin/cat \"$HOME/version\"; fi\n"
+            script += "if [ \"${1:-}\" = --version ]; then echo x >> \"$HOME/version-calls\"; "
+                + "exec /bin/cat \"$HOME/version\"; fi\n"
         }
         try (script + body + "\n").write(to: binary, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: binary.path)

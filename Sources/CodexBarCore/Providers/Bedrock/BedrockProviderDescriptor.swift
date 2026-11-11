@@ -53,8 +53,7 @@ public enum BedrockProviderDescriptor {
                     ProviderColor(hex: 0x01A88D),
                     ProviderColor(hex: 0x232F3E),
                     ProviderColor(hex: 0xFF9900),
-                ],
-                widgetColor: ProviderColor(hex: 0xFF9900)),
+                ]),
             tokenCost: ProviderTokenCostConfig(
                 supportsTokenCost: true,
                 noDataMessage: { "No AWS Bedrock cost data available. Check your AWS access keys "
@@ -134,11 +133,14 @@ struct BedrockAPIFetchStrategy: ProviderFetchStrategy {
     func fetch(_ context: ProviderFetchContext) async throws -> ProviderFetchResult {
         let resolved = try await BedrockCredentialResolver.resolve(environment: context.env)
         let budget = BedrockSettingsReader.budget(environment: context.env)
+        // CLI/serve usage stays fresh without authorizing interactive prompts.
         let usage = try await BedrockUsageFetcher.fetchUsage(
             credentials: resolved.credentials,
             region: resolved.region,
             budget: budget,
-            environment: context.env)
+            environment: context.env,
+            cache: context.runtime == .app && context.env[BedrockSettingsReader.apiURLKey] == nil
+                ? .shared : nil)
         return self.makeResult(
             usage: usage.toUsageSnapshot(),
             sourceLabel: "api")

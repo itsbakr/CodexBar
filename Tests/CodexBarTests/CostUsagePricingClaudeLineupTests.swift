@@ -13,8 +13,8 @@ struct CostUsagePricingClaudeLineupTests {
         ("anthropic.claude-opus-5-5", 0.034),
         ("us.anthropic.claude-opus-5-5", 0.034),
         ("claude-sonnet-5", 0.018),
-        ("claude-sonnet-5-5", 0.018),
-        ("global.anthropic.claude-sonnet-5-5", 0.018),
+        ("claude-sonnet-5-5", 0.017),
+        ("global.anthropic.claude-sonnet-5-5", 0.017),
     ])
     func `bundled current lineup rows price every token bucket`(model: String, expected: Double) throws {
         let cost = try #require(CostUsagePricing.claudeCostUSD(

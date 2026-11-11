@@ -1,12 +1,35 @@
 import Foundation
+import SweetCookieKit
 import Testing
 @testable import CodexBar
 @testable import CodexBarCore
 
 @MainActor
 struct PluginCookieProviderSpecTests {
+    @Test
+    func `automatic cookie guidance names the provider browser policy and manual alternative`() throws {
+        let fixture = try ProviderSettingsDescriptorTests().makeSettingsFixture(suite: #function)
+        fixture.settings.debugDisableKeychainAccess = false
+        for provider in [UsageProvider.museai, .raycast, .perplexity, .parallel, .opendesign] {
+            let implementation = try #require(ProviderCatalog.implementation(for: provider))
+            let picker = try #require(implementation.settingsPickers(
+                context: fixture.settingsContext(provider: provider)).first)
+            let browsers = ProviderDefaults.metadata[provider]?.browserCookieOrder ?? Browser.defaultImportOrder
+            let names = browsers.map(\.displayName).joined(separator: ", ")
+            #expect(picker.subtitle.contains("Supported browsers: \(names). Use Manual for other browsers."))
+            #expect(picker.dynamicSubtitle?()?.contains("Supported browsers: \(names).") == true)
+            if provider == .museai {
+                #expect(picker.subtitle.hasPrefix("Automatic imports browser cookies."))
+                for name in ["Aside", "Brave Origin", "Opera", "Opera Neon"] {
+                    #expect(browsers.map(\.displayName).contains(name))
+                }
+            }
+        }
+    }
+
     private static let providers: [UsageProvider] = [
-        .helmcode, .hyper, .manus, .perplexity, .qoder, .raycast, .sakana, .t3chat,
+        .helmcode, .hyper, .manus, .perplexity, .qoder, .raycast, .sakana, .t3chat, .lithosai, .workbuddy,
+        .claudeplatform, .opendesign,
     ]
 
     @Test

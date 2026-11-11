@@ -18,6 +18,7 @@ enum ProviderPluginHTTPResponse {
         let cookieJar: ProviderPluginCookieJar?
         let primarySession: String?
         let optionalSession: String?
+        let hidesResponseCookies: Bool
 
         init(
             rawURL: String,
@@ -31,6 +32,7 @@ enum ProviderPluginHTTPResponse {
             cookieJar: ProviderPluginCookieJar? = nil) throws
         {
             self.cookieJar = cookieJar
+            self.hidesResponseCookies = manifest.cookiePolicy?.selectedProfile == true
             self.primarySession = options["cookieSession"] as? String
             let optionalOptions = (options["optionalRequest"] as? [String: Any])?["options"] as? [String: Any]
             self.optionalSession = optionalOptions?["cookieSession"] as? String
@@ -100,7 +102,7 @@ enum ProviderPluginHTTPResponse {
         }
     }
 
-    private enum Completion: Sendable {
+    enum Completion: Sendable {
         case primary(ProviderHTTPResponse)
         case optional(ProviderHTTPResponse?)
         case budgetExpired
@@ -126,6 +128,7 @@ enum ProviderPluginHTTPResponse {
                     for: request.primary,
                     transport: request.transport(transport, session: request.primarySession),
                     retryPolicy: request.retryPolicy,
+                    contextOptions: contextOptions,
                     beforeAttempt: { request in
                         try await contextOptions.beforeHTTPAttempt?(request)
                         started.yield(.now)
@@ -138,6 +141,7 @@ enum ProviderPluginHTTPResponse {
                         for: optional,
                         transport: request.transport(transport, session: request.optionalSession),
                         retryPolicy: .disabled,
+                        contextOptions: contextOptions,
                         beforeAttempt: contextOptions.beforeHTTPAttempt))
                 }
                 group.addTask {
@@ -161,6 +165,7 @@ enum ProviderPluginHTTPResponse {
                     optionalFinished = true
                 case .budgetExpired: budgetExpired = true
                 }
+                contextOptions.didCollectHTTPCompletion?(completion)
                 // After expiry, retain optional results only while the required request is still pending.
                 if let primary, optionalFinished || budgetExpired || !(200..<300).contains(primary.statusCode) {
                     break
@@ -174,7 +179,8 @@ enum ProviderPluginHTTPResponse {
                 responseSizeLimit: responseSizeLimit,
                 enforcesUserResponsePolicy: enforcesUserResponsePolicy,
                 rejectsNonSuccessResponses: rejectsNonSuccessResponses,
-                allowsRetry: request.retryPolicy.maxRetries == 0)
+                allowsRetry: request.retryPolicy.maxRetries == 0,
+                hidesResponseCookies: request.hidesResponseCookies)
             if request.optional != nil {
                 if let optional, (200..<300).contains(primary.statusCode) {
                     payload["optional"] = try? self.checkedPayload(
@@ -183,7 +189,8 @@ enum ProviderPluginHTTPResponse {
                         responseSizeLimit: responseSizeLimit,
                         enforcesUserResponsePolicy: enforcesUserResponsePolicy,
                         rejectsNonSuccessResponses: true,
-                        allowsRetry: false)
+                        allowsRetry: false,
+                        hidesResponseCookies: request.hidesResponseCookies)
                 }
                 if payload["optional"] == nil { payload["optional"] = NSNull() }
             }
@@ -198,7 +205,8 @@ enum ProviderPluginHTTPResponse {
         responseSizeLimit: Int,
         enforcesUserResponsePolicy: Bool,
         rejectsNonSuccessResponses: Bool,
-        allowsRetry: Bool) throws -> [String: Any]
+        allowsRetry: Bool,
+        hidesResponseCookies: Bool) throws -> [String: Any]
     {
         guard response.data.count <= responseSizeLimit else {
             throw ProviderPluginError.http("response exceeded the \(responseSizeLimit)-byte limit")
@@ -212,7 +220,7 @@ enum ProviderPluginHTTPResponse {
         {
             throw ProviderPluginError.http("compressed responses are not allowed")
         }
-        return try self.payload(response, wantsJSON: wantsJSON)
+        return try self.payload(response, wantsJSON: wantsJSON, hidesResponseCookies: hidesResponseCookies)
     }
 
     // swiftlint:disable:next function_parameter_count
@@ -321,16 +329,21 @@ enum ProviderPluginHTTPResponse {
         for request: URLRequest,
         transport: any ProviderHTTPTransport,
         retryPolicy: ProviderHTTPRetryPolicy,
+        contextOptions: ProviderPluginContextOptions = .production,
         beforeAttempt: (@Sendable (URLRequest) async throws -> Void)? = nil) async throws -> ProviderHTTPResponse
     {
         let bounded = ProviderHTTPTransportHandler { request in
             try Task.checkCancellation()
             let (starts, started) = AsyncStream<ContinuousClock.Instant>.makeStream()
+            let cancellation = AdmissionCancellation()
             let task = Task {
                 defer { started.finish() }
-                try await beforeAttempt?(request)
+                try cancellation.check()
                 try Task.checkCancellation()
+                try await beforeAttempt?(request)
                 started.yield(.now)
+                try cancellation.check()
+                try Task.checkCancellation()
                 return try await transport.data(for: request)
             }
             return try await withTaskCancellationHandler {
@@ -339,18 +352,47 @@ enum ProviderPluginHTTPResponse {
                 let startedAt = await iterator.next()
                 try Task.checkCancellation()
                 guard let startedAt else { return try await task.value }
-                let deadline = startedAt.advanced(by: .seconds(request.timeoutInterval))
-                let remaining = ContinuousClock.now.duration(to: deadline)
-                return switch await BoundedTaskJoin(sourceTask: task).value(joinGrace: remaining) {
-                case let .value(response): response
-                case let .failure(error): throw error
-                case .timedOut: throw URLError(.timedOut)
+                let budget = Duration.seconds(request.timeoutInterval)
+                let sleep = BoundedTaskJoinTiming.sleep
+                let remaining = contextOptions.waitForHTTPDeadline == nil
+                    ? ContinuousClock.now.duration(to: startedAt.advanced(by: budget)) : budget
+                let wait: @Sendable (Duration) async throws -> Void = { _ in
+                    if let wait = contextOptions.waitForHTTPDeadline {
+                        try await wait(startedAt, budget)
+                    } else {
+                        try await sleep(remaining)
+                    }
+                }
+                return try await BoundedTaskJoinTiming.$sleep.withValue(wait) {
+                    switch await BoundedTaskJoin(sourceTask: task).value(joinGrace: remaining) {
+                    case let .value(response): response
+                    case let .failure(error): throw error
+                    case .timedOut: throw URLError(.timedOut)
+                    }
                 }
             } onCancel: {
-                task.cancel()
+                cancellation.cancel()
+                // A transport cancellation handler can block; don't hold the caller's
+                // cancellation path or task-group coordinator while requesting it.
+                DispatchQueue.global().async { task.cancel() }
             }
         }
-        return try await bounded.response(for: request, retryPolicy: retryPolicy)
+        return try await ProviderHTTPRetryTiming.$sleep.withValue(contextOptions.sleepBeforeRetry) {
+            try await bounded.response(for: request, retryPolicy: retryPolicy)
+        }
+    }
+
+    private final class AdmissionCancellation: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+
+        func cancel() {
+            self.lock.withLock { self.cancelled = true }
+        }
+
+        func check() throws {
+            if self.lock.withLock({ self.cancelled }) { throw CancellationError() }
+        }
     }
 
     struct StatusFailure: LocalizedError {
@@ -427,10 +469,14 @@ enum ProviderPluginHTTPResponse {
         }
     }
 
-    static func payload(_ response: ProviderHTTPResponse, wantsJSON: Bool) throws -> [String: Any] {
+    static func payload(_ response: ProviderHTTPResponse, wantsJSON: Bool, hidesResponseCookies: Bool = false)
+        throws -> [String: Any]
+    {
         var headers: [String: String] = [:]
         for (key, value) in response.response.allHeaderFields {
-            headers[String(describing: key).lowercased()] = String(describing: value)
+            let name = String(describing: key).lowercased()
+            if hidesResponseCookies, ["cookie", "set-cookie", "set-cookie2"].contains(name) { continue }
+            headers[name] = String(describing: value)
         }
         var payload: [String: Any] = [
             "status": response.statusCode,

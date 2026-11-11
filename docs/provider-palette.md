@@ -9,14 +9,18 @@ read_when:
 
 The September 28, 2026 audit of #4075 adopts 16 officially supported accents. Eleven proposed values remain
 unverified, and nine other proposals materially reduce contrast on a tested surface, so those accents stay unchanged.
-Menu-bar icons remain system-tinted templates. Existing widget colors and Moonshot's `#121212` confetti ink are preserved.
+Menu-bar icons remain system-tinted templates. Moonshot's `#121212` confetti ink is preserved.
 Original confetti entries are retained where a replacement is unsupported; supporting colors are not being recertified.
 All touched Swift color values use `ProviderColor(hex:)`.
+
+Widgets follow the menu accent when their colors were shared before #4075. Within this audit, Chutes, Command Code,
+Deepgram, and Doubao retain their previously distinct widget colors. Saved custom accent overrides still take precedence,
+and burn-down widget colors remain independent.
 
 The controlled comparison uses white and `#222222` for light/dark menu-card surfaces. A material
 regression means falling below 3:1 while losing at least 0.5 in contrast ratio compared with the previous accent.
 This is a non-regression check, not an accessibility certification of translucent desktop backgrounds or existing
-colors. Widgets keep their previous RGB values. Highlighted menu rows use the system selection tint instead.
+colors. Highlighted menu rows use the system selection tint instead.
 Old decimal RGB values are expressed as their nearest 8-bit sRGB hex (at most half a channel step of rounding).
 
 “Supported” means the exact proposed value was found in an official asset or site stylesheet; it does not mean
@@ -58,9 +62,11 @@ shows a subset of providers; regenerate its PNG and receipt together using [soci
 | notion | `#337EA9` | `#2EAADC` | `#337EA9` | [Source](https://www.notion.com/) | Unverified; retain. #2383E2 (UI blue) |
 | opencode | `#3B82F6` | `#3B7DD8` | `#3B82F6` | [Source](https://opencode.ai/brand) | Unverified; retain. #007AFF (UI accent); grayscale logo |
 | perplexity | `#20B2AA` | `#20808D` | `#20B2AA` | [Source](https://www.perplexity.ai/hub/brand) | Unverified; retain. No verified #20808D |
+| pi | `#7C3AED` | `#F09082` | `#4D9ABF` | [Official logo](https://pi.dev/logo-auto.svg) | Adopt official blue; light 5.70 → 3.14:1; dark 5.07:1. Coral is 2.33:1 on white, so it stays in confetti. |
 | qoder | `#10B981` | `#2ADB5C` | `#10B981` | [Source](https://g.alicdn.com/Qoder/qoder-web/0.0.311/_next/static/css/4cb09c403c0c207d.css) | Retain: light 2.54 → 1.84:1. |
 | sakana | `#2975DB` | `#CC2B2B` | `#2975DB` | [Source](https://sakana.ai/) | Retain: dark 3.53 → 2.99:1. |
 | sub2api | `#2DC6D8` | `#14B8A6` | `#14B8A6` | [Source](https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/frontend/tailwind.config.js) | Adopt; light 2.06 → 2.49:1; dark 6.39:1. |
 | t3chat | `#F56647` | `#A3004C` | `#F56647` | [Source](https://t3.chat/) | Unverified; retain. Not established |
 | venice | `#3399FF` | `#3C8FDD` | `#3C8FDD` | [Source](https://cdn.venice.ai/_next/static/immutable/chunks/1z9-rwfn_gg4b.css) | Adopt; light 2.94 → 3.41:1; dark 4.67:1. |
 | warp | `#938BB4` | `#01A4FF` | `#938BB4` | [Source](https://www.warp.dev/press) | Unverified; retain. #C7AEFF and #1C1A26 in official logo |
+| workbuddy | `#0DC8A6` | `#0EC8A9` | `#0DC8A6` | [Official logo](https://assets.workbuddy.cn/web/workbuddy/a5b2fb510f0e7b156f19d072fae0cd12ae1f2f19/assets/logo.svg) | Retain existing accent; this update changes only the monochrome mark. |

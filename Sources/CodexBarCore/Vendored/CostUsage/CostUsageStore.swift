@@ -20,6 +20,42 @@ actor CostUsageStore {
     private final class StoreSerialExecutor: SerialExecutor, @unchecked Sendable {
         private let queue: DispatchQueue
         private static let queueKey = DispatchSpecificKey<ObjectIdentifier>()
+        private static let registryLock = NSLock()
+        private nonisolated(unsafe) static var registry: [String: WeakExecutor] = [:]
+
+        private struct WeakExecutor {
+            weak var value: StoreSerialExecutor?
+        }
+
+        static func shared(for databaseURL: URL) -> StoreSerialExecutor {
+            var location = databaseURL
+            var visited: Set<String> = []
+            while true {
+                let directory = location.deletingLastPathComponent()
+                // Resolve existing parents and follow file links even when their target is missing.
+                // Open retries directory creation and reports errors through the normal store path.
+                try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                location = directory.resolvingSymlinksInPath().standardizedFileURL
+                    .appendingPathComponent(location.lastPathComponent)
+                guard visited.insert(location.path).inserted,
+                      let target = try? FileManager.default.destinationOfSymbolicLink(atPath: location.path)
+                else { break }
+                location = URL(fileURLWithPath: target, relativeTo: location.deletingLastPathComponent())
+            }
+            let caseSensitive = try? location.deletingLastPathComponent()
+                .resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey]).volumeSupportsCaseSensitiveNames
+            let key = caseSensitive == false
+                ? location.path.folding(options: .caseInsensitive, locale: Locale(identifier: "en_US_POSIX"))
+                : location.path
+            return Self.registryLock.withLock {
+                if let executor = Self.registry[key]?.value { return executor }
+                Self.registry = Self.registry.filter { $0.value.value != nil }
+                let suffix = String(UInt(bitPattern: key.hashValue), radix: 16).suffix(8)
+                let executor = StoreSerialExecutor(label: "com.steipete.codexbar.cost-usage-store.\(suffix)")
+                Self.registry[key] = WeakExecutor(value: executor)
+                return executor
+            }
+        }
 
         init(label: String) {
             self.queue = DispatchQueue(label: label, qos: .utility)
@@ -28,9 +64,8 @@ actor CostUsageStore {
 
         func enqueue(_ job: consuming ExecutorJob) {
             let unownedJob = UnownedJob(job)
-            let executor = self.asUnownedSerialExecutor()
-            self.queue.async {
-                unownedJob.runSynchronously(on: executor)
+            self.queue.async { [self] in
+                unownedJob.runSynchronously(on: self.asUnownedSerialExecutor())
             }
         }
 
@@ -47,7 +82,14 @@ actor CostUsageStore {
         }
 
         func sync<T>(_ operation: () throws -> T) rethrows -> T {
-            try self.queue.sync(execute: operation)
+            #if DEBUG
+            let hooks = CostUsageStoreTestHooks.current
+            return try self.queue.sync {
+                try CostUsageStoreTestHooks.$current.withValue(hooks, operation: operation)
+            }
+            #else
+            return try self.queue.sync(execute: operation)
+            #endif
         }
     }
 
@@ -74,13 +116,46 @@ actor CostUsageStore {
 
     static let log = CodexBarLog.logger(LogCategories.tokenCost)
     static let databaseFilename = "cost-usage.sqlite"
-    static let baseSchemaVersion = 3
+    static let baseSchemaVersion = 4
     static let schemaVersion = CostUsageStore.combinedSchemaVersion(
         base: CostUsageStore.baseSchemaVersion,
         parserHash: CodexParserHash.value)
     static let cacheGeneration = "sqlite:\(CostUsageStore.schemaVersion)"
     static let compatiblePredecessorParserHashes: Set<String> = [
-        "ddce8af87bf787c8", // Claude-only bundled pricing rows leave native Codex rows and checkpoints unchanged.
+        "ad011f05e9ab733a", // Claude-only pricing rows leave native Codex rows, checkpoints, and reports unchanged.
+        "2dc85fe95af0aa95", // Preserve project-accumulation caches when combined with linked-root discovery.
+        "5454415c8ea2ce7b", // Linked-root discovery preserves native rows, checkpoints, and report totals.
+        "6b42e42bafad1922", // In-place project accumulation preserves native rows, checkpoints, and report totals.
+        "f98b2d0afc00443c", // Identified pricing export preserves revision-14 rows and corrected report totals.
+        "0ef5e15cc00e8e25", // Revision 14 refreshes resumed tiers without changing stored token rows.
+        "5a57546c60494379", // Home-scoped main before archived-row retention; rows and checkpoints are unchanged.
+        "e5909f60274b2c47", // Home scoping preserves the released rows and scan checkpoints.
+        "4e1358d00a4a47b5", // Optional source ownership preserves existing native Codex rows and checkpoints.
+        "54a95e8fe7bd6ee9", // Validating inspection checkpoints leaves persisted rows and scan progress unchanged.
+        "455876ace937d42a", // Selected-session detail reads leave current-main native rows and checkpoints unchanged.
+        "4feea9e203d85529", // Replacing eager inspection with bounded reads preserves saved rows and checkpoints.
+        "d9542d1ef3ce1875", // Claude-only Mythos prices leave native Codex rows, checkpoints, and reports unchanged.
+        "a47b70abaf8ad86c", // Immutable trace-database reads leave native rows, checkpoints, and reports unchanged.
+        "3f88178bf03ad704", // Exact byte-marker searches preserve native rows, checkpoints, and reports.
+        "fc698834d6329beb", // Opt-in request observation defaults to nil; saved rows and cursors are unchanged.
+        "f406dae284de4a55", // Revision 13 reparses rows to record the session creator account for Auto-review.
+        "379b799bb4b91683", // Current main before tool inspection; stored rows and checkpoints are unchanged.
+        "7ce21041b7a36242", // Prior tool inspection stores survive upstream process cleanup.
+        "0d8f9504f8e63d0f", // On-demand tool inspection leaves current-main rows and checkpoints unchanged.
+        "c0f8e9be04d824c2", // Revision 11 billing survives stricter completion timing validation.
+        "89c0662767e633ea", // Current main row-string sharing survives bounded timing backfill.
+        "e1088fb29c221187", // Revision 11 timing survives value-preserving row-string sharing.
+        "7ff985e81e281a11", // Current main accounting survives bounded timing backfill.
+        "865cef15206ea5c0", // Revision 10 timing survives upstream accounting correction.
+        "d35c9fb00bee059b", // Revision 9 timing survives upstream accounting correction.
+        "99d920977063318a", // Preserve the saved-pricing migration before revision 9 reparses mirrors.
+        "ed735dc27ffa70d9", // 0.72.0 rows and checkpoints are kept; revision 9 reparses duplicate ledger mirrors.
+        "029fe80aa98f27e8", // Revision 7 caches retain history during bounded JSON-fallback reparsing.
+        "c61aebb9cf043a72", // Revision 6 ledger caches reparse through the shared ownership router.
+        "4a4c4ef34ce6f037", // Request-ledger accounting uses bounded native parser-revision migration.
+        "21c4024753523b36", // Fork build with Claude lineup pricing; native rows match its ddce8af87bf787c8 base.
+        "ddce8af87bf787c8", // Fork base before Claude lineup pricing; native rows and checkpoints are unchanged.
+        "04a6361469a4ff77", // Settled orphan scheduling preserves rows, replay buffers, and checkpoints.
         "98de5f52231e524e", // 0.68.0 rows and checkpoints survive sparse priority-day reconciliation.
         "9972dad7f7aeff21", // Direct-fork baseline corrections use bounded parser-revision migration.
         "4dd9e5769818370a", // Linux Priority trace support preserves native rows and checkpoints.
@@ -127,36 +202,31 @@ actor CostUsageStore {
         "3c984b655688593f", // 0.54.x row-ownership evidence fix; parser and persisted row shape unchanged.
         "5f8507161b23757c", // 0.54.2 tokscale parity + priority evidence; persisted row shape unchanged.
     ]
-    static let incompatibleRetainedReportPredecessorParserHashes: Set<String> = [
-        "dd19ffa2dcfa8d47",
-        "2d17f4981b78d07f",
-        "8050a4faf4fddb96",
-    ]
+    /// Keep corrected report totals; earlier predecessors still need Fast repricing.
+    static let incompatibleRetainedReportPredecessorParserHashes = CostUsageStore.compatiblePredecessorParserHashes
+        .subtracting([
+            "ad011f05e9ab733a",
+            "f98b2d0afc00443c",
+            "6b42e42bafad1922",
+            "2dc85fe95af0aa95",
+            "5454415c8ea2ce7b",
+        ])
 
-    /// Test-only crash injection: invoked inside `saveCodexCache`'s transaction after each
-    /// persisted file with the running count, so a crash-safety harness can SIGKILL the
-    /// process at a deterministic mid-save point. Never set in production.
-    nonisolated(unsafe) static var saveCycleCheckpointForTesting: ((Int) -> Void)?
-    /// Test-only interleaving point scoped to one database so parallel store fixtures stay isolated.
-    nonisolated(unsafe) static var identicalContentPreLockCheckpointForTesting: (
-        databaseURL: URL,
-        checkpoint: () -> Void)?
-
-    /// Test-only traversal proof for persisted Codex catch-up reconciliation. Never set in production.
-    nonisolated(unsafe) static var codexCatchUpReconciliationVisitForTesting: (() -> Void)?
-    /// Test-only read failures scoped by database and path. Never set in production.
-    nonisolated(unsafe) static var codexTokenSnapshotReadFailureForTesting: ((URL, String) -> Bool)?
-
-    /// Process-wide serialization keeps every writable store connection on the same queue.
-    /// This matches the scan pipeline's single-writer contract without multiplying executor
-    /// threads when tests or short-lived readers create several store actors.
-    private nonisolated static let sharedExecutor = StoreSerialExecutor(
-        label: "com.steipete.codexbar.cost-usage-store")
+    /// Connections to one canonical database share a serial queue, preserving the single-writer
+    /// contract without letting a busy database stall independent account stores.
+    private nonisolated let executor: StoreSerialExecutor
     nonisolated var unownedExecutor: UnownedSerialExecutor {
-        Self.sharedExecutor.asUnownedSerialExecutor()
+        self.executor.asUnownedSerialExecutor()
     }
 
+    #if DEBUG
+    nonisolated var executorForTesting: AnyObject {
+        self.executor
+    }
+    #endif
+
     nonisolated let databaseURL: URL
+    nonisolated let home: String
     private let expectedSchemaVersion: Int32
     private let expectedParserHash: String
     private let busyTimeoutMilliseconds: Int32
@@ -178,18 +248,24 @@ actor CostUsageStore {
 
     init(
         cacheRoot: URL? = nil,
+        home: String = CodexHomeCostStoreScope.key(),
         schemaVersion: Int32 = CostUsageStore.schemaVersion,
         parserHash: String = CodexParserHash.value,
         busyTimeoutMilliseconds: Int32 = 5000)
     {
-        let root = cacheRoot ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("CodexBar", isDirectory: true)
-        self.databaseURL = root
-            .appendingPathComponent("cost-usage", isDirectory: true)
-            .appendingPathComponent(Self.databaseFilename, isDirectory: false)
+        self.databaseURL = Self.databaseURL(cacheRoot: cacheRoot)
+        self.home = home
+        self.executor = StoreSerialExecutor.shared(for: self.databaseURL)
         self.expectedSchemaVersion = schemaVersion
         self.expectedParserHash = parserHash
         self.busyTimeoutMilliseconds = busyTimeoutMilliseconds
+    }
+
+    static func databaseURL(cacheRoot: URL?) -> URL {
+        let root = cacheRoot ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("CodexBar", isDirectory: true)
+        return root.appendingPathComponent("cost-usage", isDirectory: true)
+            .appendingPathComponent(Self.databaseFilename, isDirectory: false)
     }
 
     static func combinedSchemaVersion(base: Int, parserHash: String) -> Int32 {
@@ -204,12 +280,12 @@ actor CostUsageStore {
 }
 
 extension CostUsageStore {
-    /// The shared queue establishes isolation; runtime checks are unreliable for SDK-14 binaries on macOS 15.
+    /// The database queue establishes isolation; runtime checks are unreliable for SDK-14 binaries on macOS 15.
     private nonisolated func syncWithStoreIsolation<T: Sendable>(
         _ operation: (isolated CostUsageStore) throws -> T) rethrows -> T
     {
-        try Self.sharedExecutor.sync {
-            Self.sharedExecutor.checkIsolated()
+        try self.executor.sync {
+            self.executor.checkIsolated()
             typealias Isolated = (isolated CostUsageStore) throws -> T
             typealias Unisolated = (CostUsageStore) throws -> T
             return try withoutActuallyEscaping(operation) { (operation: @escaping Isolated) throws -> T in
@@ -249,13 +325,17 @@ extension CostUsageStore {
                 let persisted = try Self.inReadTransaction(database) {
                     var snapshots: [String: [CostUsageStoreTokenSnapshot]] = [:]
                     for path in paths.sorted() {
-                        if Self.codexTokenSnapshotReadFailureForTesting?(store.databaseURL, path) == true {
+                        #if DEBUG
+                        if CostUsageStoreTestHooks.current
+                            .codexTokenSnapshotReadFailure?(store.databaseURL, path) == true
+                        {
                             throw StoreError.sqlite(SQLITE_IOERR)
                         }
+                        #endif
                         snapshots[path] = try Self.readTokenSnapshots(
-                            database, path: path, recorder: store.scopedReadWorkRecorderForTesting)
+                            database, path: path, home: store.home, recorder: store.scopedReadWorkRecorderForTesting)
                         #if DEBUG
-                        if let checkpoint = Self.codexTokenHydrationCheckpointForTesting,
+                        if let checkpoint = CostUsageStoreTestHooks.current.codexTokenHydrationCheckpoint,
                            checkpoint.databaseURL == store.databaseURL
                         {
                             try checkpoint.checkpoint()
@@ -280,10 +360,11 @@ extension CostUsageStore {
 
     nonisolated func syncLoadCodexReadView(
         calendar: Calendar,
-        purpose: CostUsageStoreReadPurpose) -> CostUsageStoreReadView
+        purpose: CostUsageStoreReadPurpose,
+        sourceScope: OpenCodeLocalHistoryAdapter.ReadScope? = nil) -> CostUsageStoreReadView
     {
         self.syncWithStoreIsolation { store in
-            store.loadCodexReadView(calendar: calendar, purpose: purpose)
+            store.loadCodexReadView(calendar: calendar, purpose: purpose, sourceScope: sourceScope)
         }
     }
 
@@ -647,10 +728,15 @@ extension CostUsageStore {
         let predecessorVersion = Self.combinedSchemaVersion(
             base: Self.baseSchemaVersion,
             parserHash: storedHash)
+        let versionMatches = actualVersion == Int64(predecessorVersion)
+            || actualVersion == Int64(Self.combinedSchemaVersion(base: 3, parserHash: storedHash))
+        let knownParser = Self.compatiblePredecessorParserHashes.contains(storedHash)
+            || storedHash == self.expectedParserHash
+        let preservesArchives = try !isCurrent && versionMatches && !knownParser
+            && Self.readFiles(database).contains { CostUsageScanner.isArchivedCodexRollout($0.path) }
         let canAdoptPredecessor = self.expectedParserHash == CodexParserHash.value
             && self.expectedSchemaVersion == Self.schemaVersion
-            && Self.compatiblePredecessorParserHashes.contains(storedHash)
-            && actualVersion == Int64(predecessorVersion)
+            && versionMatches && (knownParser || preservesArchives)
         return (storedHash, isCurrent, canAdoptPredecessor)
     }
 
@@ -668,21 +754,28 @@ extension CostUsageStore {
     }
 
     private func adoptCompatiblePredecessor(_ database: OpaquePointer, storedHash: String) throws {
-        if Self.incompatibleRetainedReportPredecessorParserHashes.contains(storedHash),
-           var metadata = try Self.readSingleton(
-               CostUsageStoreMetadata.self,
-               database: database,
-               table: "scan_metadata")
+        if try Self.scalarInt(database, "PRAGMA user_version")
+            == Int64(Self.combinedSchemaVersion(base: 3, parserHash: storedHash))
         {
-            metadata.previousReportPayload = nil
-            let payload = try JSONEncoder().encode(metadata)
-            let metadataStatement = try Self.prepare(
-                database,
-                "UPDATE scan_metadata SET payload = ? WHERE id = 1")
-            defer { sqlite3_finalize(metadataStatement) }
-            Self.bind(payload, to: metadataStatement, at: 1)
-            try Self.stepDone(metadataStatement, database: database)
-            guard sqlite3_changes(database) == 1 else { throw StoreError.incompatibleSchema }
+            try self.migrateHomeScope(database)
+        }
+        if storedHash != self.expectedParserHash, !Self.compatiblePredecessorParserHashes.contains(storedHash) {
+            try self.preserveArchivedRowsAfterParserChange(database)
+        }
+        if Self.incompatibleRetainedReportPredecessorParserHashes.contains(storedHash) {
+            let rows = try Self.prepare(database, "SELECT home, payload FROM scan_metadata")
+            defer { sqlite3_finalize(rows) }
+            var result = sqlite3_step(rows)
+            while result == SQLITE_ROW {
+                guard let home = Self.columnText(rows, at: 0), let payload = Self.columnData(rows, at: 1) else {
+                    throw StoreError.invalidData
+                }
+                var metadata = try JSONDecoder().decode(CostUsageStoreMetadata.self, from: payload)
+                metadata.previousReportPayload = nil
+                try Self.writeSingleton(metadata, database: database, table: "scan_metadata", home: home)
+                result = sqlite3_step(rows)
+            }
+            guard result == SQLITE_DONE else { throw StoreError.sqlite(result) }
         }
         let statement = try Self.prepare(database, "UPDATE meta SET value = ? WHERE key = 'parser_hash'")
         defer { sqlite3_finalize(statement) }
@@ -690,6 +783,38 @@ extension CostUsageStore {
         try Self.stepDone(statement, database: database)
         guard sqlite3_changes(database) == 1 else { throw StoreError.incompatibleSchema }
         try Self.execute(database, "PRAGMA user_version = \(self.expectedSchemaVersion)")
+    }
+
+    private func preserveArchivedRowsAfterParserChange(_ database: OpaquePointer) throws {
+        let owner = try Self.prepare(database, "SELECT home FROM files WHERE path = ?")
+        let delete = try Self.prepare(database, "DELETE FROM files WHERE path = ?")
+        defer { sqlite3_finalize(owner); sqlite3_finalize(delete) }
+        var changedHomes: Set<String> = []
+        for file in try Self.readFiles(database)
+            where !file.belongsToOpenCodeLocalHistory && !CostUsageScanner.isArchivedCodexRollout(file.path)
+        {
+            sqlite3_reset(owner)
+            Self.bind(file.path, to: owner, at: 1)
+            guard sqlite3_step(owner) == SQLITE_ROW, let home = Self.columnText(owner, at: 0) else {
+                throw StoreError.invalidData
+            }
+            changedHomes.insert(home)
+            sqlite3_reset(delete)
+            Self.bind(file.path, to: delete, at: 1)
+            try Self.stepDone(delete, database: database)
+        }
+        for home in changedHomes {
+            var metadata = try Self.readSingleton(
+                CostUsageStoreMetadata.self, database: database, table: "scan_metadata", home: home) ?? .empty
+            metadata.lastScanUnixMs = 0
+            metadata.catchUpPending = true
+            metadata.scanInventoryPaths = nil
+            metadata.previousReportPayload = nil
+            try Self.writeSingleton(metadata, database: database, table: "scan_metadata", home: home)
+            try Self.rebuildDayAggregates(database, home: home)
+            try Self.deleteHomeRows(database, table: "discovery_state", home: home)
+            try Self.deleteHomeRows(database, table: "lookback_state", home: home)
+        }
     }
 
     private func createSchema(_ database: OpaquePointer) throws {
@@ -720,9 +845,8 @@ extension CostUsageStore {
         }
     }
 
-    /// The Codex JSON cache is derived data, so the SQLite cutover deliberately rebuilds
-    /// from session files instead of importing an old monolithic snapshot. Keep the legacy
-    /// filename knowledge confined to this one cleanup boundary.
+    /// Discard the legacy JSON snapshot rather than importing it. Existing SQLite history
+    /// remains authoritative, including homes other than the one starting this scan.
     func removeLegacyCodexArtifactIfPresent() -> Bool {
         let directory = self.databaseURL.deletingLastPathComponent()
         let legacyFilename = "codex-v11.json"
@@ -741,7 +865,6 @@ extension CostUsageStore {
         for url in temporaryNames {
             try? FileManager.default.removeItem(at: url)
         }
-        self.rebuildDatabase(reason: "legacy Codex JSON artifact removed")
         return true
     }
 }
@@ -749,17 +872,44 @@ extension CostUsageStore {
 // MARK: - Schema
 
 extension CostUsageStore {
+    static let dayAggregatesSchemaSQL = """
+    CREATE TABLE day_aggregates (
+        home TEXT NOT NULL,
+        day TEXT NOT NULL,
+        model TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL,
+        cached_tokens INTEGER NOT NULL,
+        output_tokens INTEGER NOT NULL,
+        reasoning_tokens INTEGER NOT NULL,
+        request_count INTEGER NOT NULL,
+        authoritative_cost_nanos INTEGER NOT NULL,
+        standard_input_tokens INTEGER NOT NULL,
+        standard_cached_tokens INTEGER NOT NULL,
+        standard_output_tokens INTEGER NOT NULL,
+        priority_input_tokens INTEGER NOT NULL,
+        priority_cached_tokens INTEGER NOT NULL,
+        priority_output_tokens INTEGER NOT NULL,
+        standard_tokens INTEGER NOT NULL,
+        priority_tokens INTEGER NOT NULL,
+        PRIMARY KEY(home, day, model)
+    );
+    CREATE INDEX day_aggregates_home_model_idx ON day_aggregates(home, model, day);
+    """
+
     private static let schemaSQL = """
     CREATE TABLE meta (
         key TEXT PRIMARY KEY NOT NULL,
         value TEXT NOT NULL
     );
     CREATE TABLE scan_metadata (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        payload BLOB NOT NULL
+        home TEXT NOT NULL,
+        id INTEGER NOT NULL CHECK (id = 1),
+        payload BLOB NOT NULL,
+        PRIMARY KEY(home, id)
     );
     CREATE TABLE files (
         id INTEGER PRIMARY KEY,
+        home TEXT NOT NULL,
         path TEXT NOT NULL UNIQUE,
         inode INTEGER,
         mtime_ms INTEGER NOT NULL,
@@ -777,6 +927,7 @@ extension CostUsageStore {
         updated_at_ms INTEGER NOT NULL
     );
     CREATE INDEX files_path_idx ON files(path);
+    CREATE INDEX files_home_path_idx ON files(home, path);
     CREATE INDEX files_session_idx ON files(session_id);
     CREATE INDEX files_coverage_idx ON files(coverage_since_day, coverage_until_day);
     CREATE INDEX files_updated_idx ON files(updated_at_ms);
@@ -828,28 +979,7 @@ extension CostUsageStore {
     );
     CREATE INDEX file_day_aggregates_day_idx ON file_day_aggregates(day);
     CREATE INDEX file_day_aggregates_model_day_idx ON file_day_aggregates(model, day);
-    CREATE TABLE day_aggregates (
-        day TEXT NOT NULL,
-        model TEXT NOT NULL,
-        input_tokens INTEGER NOT NULL,
-        cached_tokens INTEGER NOT NULL,
-        output_tokens INTEGER NOT NULL,
-        reasoning_tokens INTEGER NOT NULL,
-        request_count INTEGER NOT NULL,
-        authoritative_cost_nanos INTEGER NOT NULL,
-        standard_input_tokens INTEGER NOT NULL,
-        standard_cached_tokens INTEGER NOT NULL,
-        standard_output_tokens INTEGER NOT NULL,
-        priority_input_tokens INTEGER NOT NULL,
-        priority_cached_tokens INTEGER NOT NULL,
-        priority_output_tokens INTEGER NOT NULL,
-        standard_tokens INTEGER NOT NULL,
-        priority_tokens INTEGER NOT NULL,
-        PRIMARY KEY(day, model)
-    );
-    CREATE INDEX day_aggregates_day_idx ON day_aggregates(day);
-    CREATE INDEX day_aggregates_model_idx ON day_aggregates(model);
-    CREATE INDEX day_aggregates_model_day_idx ON day_aggregates(model, day);
+    \(CostUsageStore.dayAggregatesSchemaSQL)
     CREATE TABLE fork_lineage (
         file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
         session_id TEXT,
@@ -871,12 +1001,16 @@ extension CostUsageStore {
     );
     CREATE INDEX buffered_lines_file_idx ON buffered_lines(file_id, kind, line_index);
     CREATE TABLE discovery_state (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        payload BLOB NOT NULL
+        home TEXT NOT NULL,
+        id INTEGER NOT NULL CHECK (id = 1),
+        payload BLOB NOT NULL,
+        PRIMARY KEY(home, id)
     );
     CREATE TABLE lookback_state (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        payload BLOB NOT NULL
+        home TEXT NOT NULL,
+        id INTEGER NOT NULL CHECK (id = 1),
+        payload BLOB NOT NULL,
+        PRIMARY KEY(home, id)
     );
     CREATE TABLE accumulators (
         file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
